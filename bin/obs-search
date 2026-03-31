@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# obs-search — search Obsidian vault
+# Mode-aware: Work (project-based) vs Self (topic-based)
+# Transport: Obsidian CLI (primary) → filesystem (fallback)
+#
+# Usage:
+#   obs-search "query"              # full-text search across vault
+#   obs-search --project            # show project/topic context
+#   obs-search --session            # show Session.md (AI tasks)
+#   obs-search --decisions          # show decisions log
+#   obs-search --recent 5           # recent session logs
+#   obs-search --cross "topic"      # search across both Work and Self
+#
+# Env vars:
+#   AI_MODE                         # "work" or "self"
+#   AI_PROJECT                      # project name
+#   OBSIDIAN_VAULT                  # path to single Obsidian vault
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=obs-lib
+source "${SCRIPT_DIR}/obs-lib"
+
+obs_require_vault
+
+MODE_ARG=""
+QUERY=""
+LIMIT=5
+
+# ── args ────────────────────────────────────────────────────────────────────
+case "${1:-}" in
+  --project)    MODE_ARG="project" ;;
+  --session)    MODE_ARG="session" ;;
+  --decisions)  MODE_ARG="decisions" ;;
+  --recent)     MODE_ARG="recent"; LIMIT="${2:-5}" ;;
+  --cross)      MODE_ARG="cross"; QUERY="${2:-}" ;;
+  -h|--help)
+    echo "Usage: obs-search <query> | --project | --session | --decisions | --recent [N] | --cross <query>"
+    echo "  <query>       full-text search across entire vault"
+    echo "  --project     show project/topic context"
+    echo "  --session     show Session.md tasks"
+    echo "  --decisions   show decisions log"
+    echo "  --recent [N]  recent session logs (default 5)"
+    echo "  --cross QUERY search across both Work and Self (cross-link discovery)"
+    exit 0
+    ;;
+  "")
+    echo "Usage: obs-search <query> | --project | --session | --decisions | --recent [N] | --cross <query>" >&2
+    exit 1
+    ;;
+  *)
+    QUERY="$1"
+    ;;
+esac
+
+# ── dispatch ────────────────────────────────────────────────────────────────
+case "${MODE_ARG:-search}" in
+  project)
+    echo "=== [${OBS_MODE^^}] Project: ${OBS_PROJECT} ==="
+    echo ""
+    CONTENT=$(obs_read_note "$(obs_context_note)")
+    if [[ -n "$CONTENT" ]]; then
+      echo "$CONTENT"
+    else
+      echo "(not found — run: obs-write --init)"
+    fi
+    ;;
+
+  session)
+    echo "=== [${OBS_MODE^^}] Session: ${OBS_PROJECT} ==="
+    echo ""
+    CONTENT=$(obs_read_note "$(obs_session_note)")
+    if [[ -n "$CONTENT" ]]; then
+      echo "$CONTENT"
+    else
+      echo "(no Session.md — run: obs-write --init)"
+    fi
+    ;;
+
+  decisions)
+    echo "=== [${OBS_MODE^^}] Decisions: ${OBS_PROJECT} ==="
+    echo ""
+    CONTENT=$(obs_read_note "$(obs_decisions_dir)/log.md")
+    if [[ -n "$CONTENT" ]]; then
+      echo "$CONTENT"
+    else
+      echo "(no decisions logged yet)"
+    fi
+    ;;
+
+  recent)
+    echo "=== Recent sessions (${LIMIT}) ==="
+    echo ""
+    SESSION_DIR=$(obs_sessions_dir)
+    FILES=$(obs_list_dir "$SESSION_DIR" "$LIMIT")
+    if [[ -n "$FILES" ]]; then
+      while read -r f; do
+        echo "### ${f}"
+        CONTENT=$(obs_read_note "${SESSION_DIR}/${f}")
+        echo "$CONTENT" | head -15
+        echo ""
+      done <<< "$FILES"
+    else
+      echo "(no session logs yet)"
+    fi
+    ;;
+
+  cross)
+    echo "=== Cross-search: \"${QUERY}\" (both Work and Self) ==="
+    echo ""
+    if obs_cli_available; then
+      obsidian search-content "${QUERY}" 2>/dev/null || echo "(no results)"
+    elif obs_vault_set; then
+      # Search across both Work/ and Self/ directories
+      for scope in "Work" "Self"; do
+        RESULTS=$(grep -rl "$QUERY" "${OBS_VAULT}/${scope}/" 2>/dev/null | head -5)
+        if [[ -n "$RESULTS" ]]; then
+          echo "## ${scope}"
+          while read -r f; do
+            REL="${f#"${OBS_VAULT}/"}"
+            echo "  - ${REL}"
+            grep -n "$QUERY" "$f" 2>/dev/null | head -2 | sed 's/^/    /'
+          done <<< "$RESULTS"
+          echo ""
+        fi
+      done
+    fi
+    ;;
+
+  search)
+    echo "=== Search: \"${QUERY}\" ==="
+    echo ""
+    RESULTS=$(obs_search "$QUERY")
+    if [[ -n "$RESULTS" ]]; then
+      echo "$RESULTS"
+    else
+      echo "(no results)"
+    fi
+    ;;
+esac

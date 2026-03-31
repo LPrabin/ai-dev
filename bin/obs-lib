@@ -1,0 +1,261 @@
+#!/usr/bin/env bash
+# obs-lib — shared library for Obsidian integration
+# Sourced by obs-read, obs-write, obs-search, build-context, ai-mode
+#
+# Transport priority:
+#   1. Obsidian CLI  (`obsidian` command — official, v1.12+)
+#   2. Filesystem     (direct read/write to vault directory)
+#
+# Single vault, two top-level folders:
+#   Work/Projects/<name>/...
+#   Self/Topics/<name>/...
+#
+# Env vars:
+#   OBSIDIAN_VAULT    — path to the single vault (also used as vault name)
+#   AI_MODE           — "work" or "self"
+#   AI_PROJECT        — project/topic name (defaults to basename of $PWD)
+#
+# Obsidian CLI reference (from kepano/obsidian-skills):
+#   obsidian read path="folder/note.md"
+#   obsidian create name="Note" content="..." silent
+#   obsidian append path="folder/note.md" content="..." silent
+#   obsidian search query="term" limit=10
+#   obsidian property:set name="key" value="val" path="note.md"
+#   obsidian tasks daily todo
+#   obsidian daily:read / obsidian daily:append content="..."
+#   Use silent to prevent files from opening in Obsidian.
+
+# ── config ──────────────────────────────────────────────────────────────────
+
+OBS_MODE="${AI_MODE:-work}"
+OBS_PROJECT="${AI_PROJECT:-$(basename "$PWD")}"
+OBS_VAULT="${OBSIDIAN_VAULT:-}"
+OBS_VAULT_NAME="${OBS_VAULT_NAME:-}"  # optional: vault name for CLI targeting
+OBS_DATE=$(date +%Y-%m-%d)
+OBS_TIME=$(date +%H:%M)
+
+# ── transport detection ─────────────────────────────────────────────────────
+
+obs_cli_available() {
+  command -v obsidian &>/dev/null
+}
+
+obs_vault_set() {
+  [[ -n "$OBS_VAULT" ]] && [[ -d "$OBS_VAULT" ]]
+}
+
+# Helper: optional vault= prefix for CLI commands
+_obs_vault_arg() {
+  if [[ -n "$OBS_VAULT_NAME" ]]; then
+    echo "vault=\"${OBS_VAULT_NAME}\""
+  fi
+}
+
+# ── path helpers ────────────────────────────────────────────────────────────
+
+obs_base_path() {
+  if [[ "$OBS_MODE" == "work" ]]; then
+    echo "Work/Projects/${OBS_PROJECT}"
+  else
+    echo "Self/Topics/${OBS_PROJECT}"
+  fi
+}
+
+obs_context_note() {
+  local base
+  base=$(obs_base_path)
+  if [[ "$OBS_MODE" == "work" ]]; then
+    echo "${base}/README.md"
+  else
+    echo "${base}/learnings.md"
+  fi
+}
+
+obs_session_note()   { echo "$(obs_base_path)/Session.md"; }
+obs_sessions_dir()   { echo "$(obs_base_path)/Sessions"; }
+obs_decisions_dir()  { echo "$(obs_base_path)/Decisions"; }
+obs_skills_dir()     { echo "$(obs_base_path)/Skills"; }
+obs_errors_dir()     { echo "$(obs_base_path)/Errors"; }
+obs_session_file()   { echo "$(obs_sessions_dir)/${OBS_DATE}.md"; }
+
+# ── read ────────────────────────────────────────────────────────────────────
+
+obs_read_note() {
+  local note="$1"
+  if obs_cli_available; then
+    obsidian read $(_obs_vault_arg) path="${note}" 2>/dev/null || echo ""
+  elif obs_vault_set; then
+    local path="${OBS_VAULT}/${note}"
+    [[ -f "$path" ]] && cat "$path" || echo ""
+  else
+    echo ""
+  fi
+}
+
+# ── write (append to existing or create new) ────────────────────────────────
+
+obs_write_note() {
+  local note="$1" content="$2"
+  if obs_cli_available; then
+    # Try append first (works if note exists), fall back to create
+    obsidian append $(_obs_vault_arg) path="${note}" content="${content}" silent 2>/dev/null \
+      || obsidian create $(_obs_vault_arg) name="${note}" content="${content}" silent 2>/dev/null
+  elif obs_vault_set; then
+    local path="${OBS_VAULT}/${note}"
+    mkdir -p "$(dirname "$path")"
+    echo "$content" >> "$path"
+  else
+    obs_die "No transport available. Set OBSIDIAN_VAULT or install Obsidian CLI (v1.12+)"
+  fi
+}
+
+obs_overwrite_note() {
+  local note="$1" content="$2"
+  if obs_cli_available; then
+    # Create with overwrite flag, or create new
+    obsidian create $(_obs_vault_arg) name="${note}" content="${content}" silent overwrite 2>/dev/null \
+      || obsidian create $(_obs_vault_arg) name="${note}" content="${content}" silent 2>/dev/null
+  elif obs_vault_set; then
+    local path="${OBS_VAULT}/${note}"
+    mkdir -p "$(dirname "$path")"
+    echo "$content" > "$path"
+  else
+    obs_die "No transport available. Set OBSIDIAN_VAULT or install Obsidian CLI (v1.12+)"
+  fi
+}
+
+# ── search ──────────────────────────────────────────────────────────────────
+
+obs_search() {
+  local query="$1" limit="${2:-10}"
+  if obs_cli_available; then
+    obsidian search $(_obs_vault_arg) query="${query}" limit="${limit}" 2>/dev/null
+  elif obs_vault_set; then
+    grep -rl "$query" "${OBS_VAULT}/" 2>/dev/null | head -"$limit" | while read -r f; do
+      local rel="${f#"${OBS_VAULT}/"}"
+      echo "### ${rel}"
+      grep -n "$query" "$f" | head -3
+    done
+  else
+    echo "(No search available. Set OBSIDIAN_VAULT or install Obsidian CLI)"
+  fi
+}
+
+# ── tasks (Obsidian CLI native) ─────────────────────────────────────────────
+
+obs_tasks_today() {
+  if obs_cli_available; then
+    obsidian tasks $(_obs_vault_arg) daily todo 2>/dev/null
+  else
+    # Fallback: grep for unchecked tasks in Session.md
+    obs_read_note "$(obs_session_note)" | grep -E "^\s*- \[ \]" || echo "(no open tasks)"
+  fi
+}
+
+obs_task_add() {
+  local task="$1"
+  if obs_cli_available; then
+    obsidian daily:append $(_obs_vault_arg) content="- [ ] ${task}" silent 2>/dev/null
+  else
+    obs_write_note "$(obs_session_note)" "- [ ] ${task}"
+  fi
+}
+
+# ── daily note integration ──────────────────────────────────────────────────
+
+obs_daily_read() {
+  if obs_cli_available; then
+    obsidian daily:read $(_obs_vault_arg) 2>/dev/null || echo "(no daily note)"
+  else
+    echo "(daily notes require Obsidian CLI)"
+  fi
+}
+
+obs_daily_append() {
+  local content="$1"
+  if obs_cli_available; then
+    obsidian daily:append $(_obs_vault_arg) content="${content}" silent 2>/dev/null
+  else
+    echo "(daily append requires Obsidian CLI)" >&2
+  fi
+}
+
+# ── property management ─────────────────────────────────────────────────────
+
+obs_property_set() {
+  local note="$1" key="$2" value="$3"
+  if obs_cli_available; then
+    obsidian property:set $(_obs_vault_arg) name="${key}" value="${value}" path="${note}" 2>/dev/null
+  else
+    echo "(property:set requires Obsidian CLI)" >&2
+  fi
+}
+
+# ── backlinks ───────────────────────────────────────────────────────────────
+
+obs_backlinks() {
+  local note="$1"
+  if obs_cli_available; then
+    obsidian backlinks $(_obs_vault_arg) path="${note}" 2>/dev/null
+  elif obs_vault_set; then
+    # Fallback: grep for wikilinks referencing this note
+    local name
+    name=$(basename "$note" .md)
+    grep -rl "\[\[${name}" "${OBS_VAULT}/" 2>/dev/null | head -10
+  else
+    echo "(backlinks not available)"
+  fi
+}
+
+# ── directory listing ───────────────────────────────────────────────────────
+
+obs_list_dir() {
+  local dir="$1" limit="${2:-10}"
+  if obs_vault_set; then
+    ls -t "${OBS_VAULT}/${dir}/"*.md 2>/dev/null | head -"$limit" | while read -r f; do
+      basename "$f"
+    done
+  fi
+}
+
+# ── mkdir ───────────────────────────────────────────────────────────────────
+
+obs_ensure_dirs() {
+  local base
+  base=$(obs_base_path)
+  if obs_vault_set; then
+    mkdir -p "${OBS_VAULT}/${base}"
+    mkdir -p "${OBS_VAULT}/$(obs_sessions_dir)"
+    mkdir -p "${OBS_VAULT}/$(obs_decisions_dir)"
+    mkdir -p "${OBS_VAULT}/$(obs_skills_dir)"
+    mkdir -p "${OBS_VAULT}/$(obs_errors_dir)"
+  fi
+  # CLI creates paths implicitly on write
+}
+
+# ── output helpers ──────────────────────────────────────────────────────────
+
+obs_die() { echo "[obs] error: $*" >&2; exit 1; }
+
+obs_banner() {
+  echo "=== Obsidian [${OBS_MODE^^}] ${OBS_PROJECT} ==="
+  echo ""
+}
+
+obs_footer() {
+  echo "[vault: ${OBS_VAULT:-<not set>}]"
+  echo "[mode: ${OBS_MODE}]"
+  local transport="none"
+  obs_cli_available && transport="cli"
+  obs_vault_set && [[ "$transport" == "none" ]] && transport="filesystem"
+  obs_cli_available && obs_vault_set && transport="cli+filesystem"
+  echo "[transport: ${transport}]"
+}
+
+# ── validation ──────────────────────────────────────────────────────────────
+
+obs_require_vault() {
+  if ! obs_cli_available && ! obs_vault_set; then
+    obs_die "No vault access. Install Obsidian CLI (v1.12+) or set OBSIDIAN_VAULT env var"
+  fi
+}

@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+# obs-write — write to Obsidian second brain
+# Mode-aware: Work (project-based) vs Self (topic-based)
+# Transport: Obsidian CLI (primary) → filesystem (fallback)
+#
+# Usage:
+#   obs-write                       # interactive session log
+#   obs-write --init                # create project/topic structure
+#   obs-write --session "tasks"     # write to Session.md (AI tasks)
+#   obs-write --decision "text"     # log a decision
+#   obs-write --fix "text"          # log a bug fix
+#   obs-write --skill "text"        # log a learned skill/pattern
+#   obs-write --link "Work/Projects/other"  # cross-link to another note
+#   echo "note" | obs-write         # pipe content
+#
+# Env vars:
+#   AI_MODE                         # "work" or "self"
+#   AI_PROJECT                      # project name (defaults to basename $PWD)
+#   OBSIDIAN_VAULT                  # path to single Obsidian vault
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=obs-lib
+source "${SCRIPT_DIR}/obs-lib"
+
+obs_require_vault
+
+# ── init structure ──────────────────────────────────────────────────────────
+
+init_structure() {
+  obs_ensure_dirs
+
+  # Create main context note
+  if [[ "$OBS_MODE" == "work" ]]; then
+    local content="# ${OBS_PROJECT}
+
+Created: ${OBS_DATE}
+
+## Stack
+- Language:
+- Package manager: uv
+- Framework:
+
+## Conventions
+-
+
+## Decisions
+-
+
+## Open items
+-
+
+## Links
+<!-- Cross-link to Self/Topics notes when a project touches a learning area -->
+"
+  else
+    local content="# ${OBS_PROJECT}
+
+Created: ${OBS_DATE}
+
+## Focus
+-
+
+## Learnings
+-
+
+## Resources
+-
+
+## Open questions
+-
+
+## Links
+<!-- Cross-link to Work/Projects notes when learning applies to a project -->
+"
+  fi
+  obs_overwrite_note "$(obs_context_note)" "$content"
+  echo "Created: $(obs_context_note)"
+
+  # Create Session.md
+  local session_content="# Session — ${OBS_DATE}
+
+## Tasks
+- [ ]
+
+## Notes
+-
+"
+  obs_overwrite_note "$(obs_session_note)" "$session_content"
+  echo "Created: $(obs_session_note)"
+
+  # Create empty log files
+  obs_write_note "$(obs_decisions_dir)/log.md" "# Decisions — ${OBS_PROJECT}"
+  obs_write_note "$(obs_skills_dir)/log.md" "# Skills — ${OBS_PROJECT}"
+  obs_write_note "$(obs_errors_dir)/log.md" "# Errors & Fixes — ${OBS_PROJECT}"
+
+  echo ""
+  echo "Vault structure created at: $(obs_base_path)"
+  echo "  Mode: ${OBS_MODE}"
+  obs_footer
+}
+
+# ── argument dispatch ───────────────────────────────────────────────────────
+case "${1:-}" in
+  --init)
+    init_structure
+    exit 0
+    ;;
+
+  --session)
+    shift
+    ENTRY="## ${OBS_TIME} — session
+
+$*
+"
+    obs_write_note "$(obs_session_note)" "$ENTRY"
+    echo "Updated: $(obs_session_note)"
+    exit 0
+    ;;
+
+  --decision)
+    shift
+    ENTRY="- [${OBS_DATE} ${OBS_TIME}] Decision: $*"
+    obs_write_note "$(obs_decisions_dir)/log.md" "$ENTRY"
+    obs_write_note "$(obs_session_file)" "$ENTRY"
+    echo "Logged decision to $(obs_decisions_dir)/log.md"
+    exit 0
+    ;;
+
+  --fix)
+    shift
+    ENTRY="- [${OBS_DATE} ${OBS_TIME}] Fix: $*"
+    obs_write_note "$(obs_errors_dir)/log.md" "$ENTRY"
+    obs_write_note "$(obs_session_file)" "$ENTRY"
+    echo "Logged fix to $(obs_errors_dir)/log.md"
+    exit 0
+    ;;
+
+  --skill)
+    shift
+    ENTRY="- [${OBS_DATE} ${OBS_TIME}] Skill: $*"
+    obs_write_note "$(obs_skills_dir)/log.md" "$ENTRY"
+    obs_write_note "$(obs_session_file)" "$ENTRY"
+    echo "Logged skill to $(obs_skills_dir)/log.md"
+    exit 0
+    ;;
+
+  --link)
+    shift
+    TARGET="$1"
+    ENTRY="- [[${TARGET}]] — linked ${OBS_DATE}"
+    CONTEXT_NOTE=$(obs_context_note)
+    obs_write_note "$CONTEXT_NOTE" "$ENTRY"
+    echo "Added link to ${TARGET} in ${CONTEXT_NOTE}"
+    exit 0
+    ;;
+
+  -h|--help)
+    echo "Usage: obs-write [--init | --session TEXT | --decision TEXT | --fix TEXT | --skill TEXT | --link PATH]"
+    echo "  (no flag)     interactive session log"
+    echo "  --init        create project/topic vault structure"
+    echo "  --session     write to Session.md"
+    echo "  --decision    log a decision"
+    echo "  --fix         log a bug fix"
+    echo "  --skill       log a learned skill/pattern"
+    echo "  --link        cross-link to another note (Obsidian [[wikilink]])"
+    exit 0
+    ;;
+esac
+
+# ── pipe or interactive ─────────────────────────────────────────────────────
+if [[ ! -t 0 ]]; then
+  CONTENT=$(cat)
+else
+  TMPFILE=$(mktemp /tmp/obs-session-XXXXXX.md)
+  cat > "$TMPFILE" <<EOF
+## [${OBS_TIME}] ${OBS_PROJECT} — ${OBS_MODE} session
+
+### Decisions
+-
+
+### Fixes / discoveries
+-
+
+### Skills learned
+-
+
+### Open
+-
+
+### Notes
+-
+EOF
+  "${EDITOR:-vi}" "$TMPFILE"
+  CONTENT=$(cat "$TMPFILE")
+  rm -f "$TMPFILE"
+fi
+
+[[ -z "$CONTENT" ]] && { echo "Nothing to write."; exit 0; }
+obs_write_note "$(obs_session_file)" "$CONTENT"
+echo "Session logged: $(obs_session_file)"

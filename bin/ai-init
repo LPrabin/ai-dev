@@ -1,0 +1,316 @@
+#!/usr/bin/env bash
+# ai-init — scaffold any project with AI dev tooling
+#
+# Usage:
+#   ai-init                    scaffold current directory (uses dirname)
+#   ai-init my-project         scaffold with explicit project name
+#   ai-init --global-install   install ~/.ai and add bin to PATH (run once)
+#
+# What it creates:
+#   AGENTS.md                  universal AI context file
+#   CLAUDE.md                  symlink -> AGENTS.md  (if claude is installed)
+#   .ai/rules/conventions.md   project-specific overrides (empty template)
+#   .ai/skills/stack.md        project stack notes (empty template)
+#
+# What it creates in Obsidian (single vault):
+#   Work/Projects/<name>/...   or Self/Topics/<name>/...
+
+set -euo pipefail
+
+AI_HOME="${AI_HOME:-$HOME/.ai}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TEMPLATE_DIR="${SCRIPT_DIR}/../template"
+
+# shellcheck source=obs-lib
+source "${SCRIPT_DIR}/obs-lib"
+
+# ── helpers ─────────────────────────────────────────────────────────────────
+info()    { echo "  [ai-init] $*"; }
+success() { echo "  [ok]      $*"; }
+skip()    { echo "  [skip]    $*"; }
+
+# ── global install ───────────────────────────────────────────────────────────
+global_install() {
+  echo "Installing ~/.ai global config..."
+
+  # Copy context files
+  mkdir -p "$AI_HOME"/{context/{rules,skills,agents},bin,prompts,skills}
+
+  local src_context="${SCRIPT_DIR}/../context"
+  if [[ -d "$src_context" ]]; then
+    cp -r "$src_context/"* "$AI_HOME/context/"
+    success "context files installed to ${AI_HOME}/context/"
+  else
+    echo "Warning: context dir not found at ${src_context}" >&2
+  fi
+
+  # Copy bundled skills (obsidian-cli, obsidian-markdown)
+  local src_skills="${SCRIPT_DIR}/../skills"
+  if [[ -d "$src_skills" ]]; then
+    cp -r "$src_skills/"* "$AI_HOME/skills/"
+    success "skills installed to ${AI_HOME}/skills/"
+  fi
+
+  # Symlink bin scripts
+  mkdir -p "$AI_HOME/bin"
+  local src_bin="${SCRIPT_DIR}"
+  for script in obs-read obs-write obs-search obs-lib ai-review ai-ship ai-init ai-mode ai-start ai-debug build-context; do
+    local src="${src_bin}/${script}"
+    local dst="${AI_HOME}/bin/${script}"
+    if [[ -f "$src" ]]; then
+      chmod +x "$src"
+      ln -sf "$src" "$dst"
+      success "linked: ${dst}"
+    fi
+  done
+
+  # Shell config
+  local shell_rc=""
+  if [[ -f "$HOME/.zshrc" ]]; then
+    shell_rc="$HOME/.zshrc"
+  elif [[ -f "$HOME/.bashrc" ]]; then
+    shell_rc="$HOME/.bashrc"
+  fi
+
+  local env_block='
+# === ai-dev setup ===
+export AI_HOME="$HOME/.ai"
+export PATH="$AI_HOME/bin:$PATH"
+
+# Mode: "work" (project-based) or "self" (learning/exploration)
+export AI_MODE="work"
+
+# Single Obsidian vault — UPDATE THIS PATH
+export OBSIDIAN_VAULT="$HOME/Documents/Brain"
+# Optional: vault name for CLI targeting (if different from default)
+# export OBS_VAULT_NAME="Brain"
+
+# Aliases
+alias ai-work='"'"'export AI_MODE="work"'"'"'
+alias ai-self='"'"'export AI_MODE="self"'"'"'
+'
+
+  if [[ -n "$shell_rc" ]]; then
+    if ! grep -q "AI_HOME" "$shell_rc" 2>/dev/null; then
+      echo "$env_block" >> "$shell_rc"
+      success "added env config to ${shell_rc}"
+      info "Run: source ${shell_rc}"
+    else
+      skip "env already in ${shell_rc}"
+    fi
+  else
+    echo ""
+    info "Add this to your shell rc manually:"
+    echo "$env_block"
+  fi
+
+  # Initialize vault structure
+  if obs_vault_set; then
+    echo ""
+    echo "Initializing vault..."
+    bash "${SCRIPT_DIR}/ai-mode" --init
+  fi
+
+  # Assemble context and push to detected tools
+  echo ""
+  echo "Building context..."
+  local build_script="${AI_HOME}/bin/build-context"
+  if [[ -x "$build_script" ]]; then
+    "$build_script"
+    command -v claude    &>/dev/null && "$build_script" --adapter claude-code
+    command -v codex     &>/dev/null && "$build_script" --adapter codex
+    command -v opencode  &>/dev/null && "$build_script" --adapter opencode
+  else
+    bash "${SCRIPT_DIR}/build-context"
+  fi
+
+  echo ""
+  echo "Global install complete."
+  echo ""
+  echo "Next steps:"
+  echo "  1. Set OBSIDIAN_VAULT in your shell rc to your vault path"
+  echo "  2. source ~/.zshrc"
+  echo "  3. ai-mode --init           # create vault folders"
+  echo "  4. cd your-project && ai-init"
+  echo "  5. ai-start                 # begin a session"
+  exit 0
+}
+
+# ── project scaffold ─────────────────────────────────────────────────────────
+scaffold_project() {
+  local project_name="$1"
+  local project_dir="$PWD"
+  local date_str
+  date_str=$(date +%Y-%m-%d)
+
+  echo ""
+  echo "Scaffolding: ${project_name}"
+  echo "Directory:   ${project_dir}"
+  echo "Mode:        ${OBS_MODE}"
+  echo ""
+
+  # Derive package name (snake_case)
+  local package_name
+  package_name=$(echo "$project_name" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/_/g')
+
+  # ── AGENTS.md ─────────────────────────────────────────────────────────────
+  if [[ -f "AGENTS.md" ]]; then
+    skip "AGENTS.md already exists"
+  else
+    local tmpl="${TEMPLATE_DIR}/AGENTS.md"
+    if [[ -f "$tmpl" ]]; then
+      sed \
+        -e "s/{{PROJECT_NAME}}/${project_name}/g" \
+        -e "s/{{PACKAGE_NAME}}/${package_name}/g" \
+        -e "s/{{DATE}}/${date_str}/g" \
+        "$tmpl" > AGENTS.md
+      success "created AGENTS.md"
+    else
+      cat > AGENTS.md <<EOF
+# ${project_name}
+
+## Stack
+- Language: Python 3.12, Package manager: uv, Testing: pytest
+
+## Run commands
+\`\`\`bash
+uv run python -m ${package_name}
+uv run pytest -q
+ai-review && ai-ship
+\`\`\`
+
+## Conventions
+<!-- fill in -->
+
+## Architecture decisions
+<!-- fill in -->
+
+## Obsidian
+\`$(obs_base_path)\` — run \`ai-start\` at session start.
+EOF
+      success "created AGENTS.md (inline)"
+    fi
+  fi
+
+  # ── Tool-specific adapters ─────────────────────────────────────────────────
+
+  # Claude Code: CLAUDE.md symlink
+  if command -v claude &>/dev/null; then
+    if [[ -f "CLAUDE.md" ]]; then
+      skip "CLAUDE.md already exists"
+    elif [[ -L "CLAUDE.md" ]]; then
+      skip "CLAUDE.md symlink already exists"
+    else
+      ln -s AGENTS.md CLAUDE.md
+      success "created CLAUDE.md -> AGENTS.md symlink (Claude Code)"
+    fi
+  fi
+
+  # Codex / OpenCode read AGENTS.md natively
+  command -v codex    &>/dev/null && info "codex detected — reads AGENTS.md natively"
+  command -v opencode &>/dev/null && info "opencode detected — reads AGENTS.md natively"
+
+  # ── .ai/ project config ────────────────────────────────────────────────────
+  mkdir -p .ai/{rules,skills}
+
+  if [[ ! -f ".ai/rules/conventions.md" ]]; then
+    cat > .ai/rules/conventions.md <<EOF
+# Project conventions: ${project_name}
+
+<!-- Override or extend global rules from ~/.ai/context/rules/ -->
+<!-- Examples:
+- Commit prefix: NM-123 feat: description
+- API response shape: {"data": ..., "meta": {...}}
+- Logging: use structlog, not stdlib
+-->
+EOF
+    success "created .ai/rules/conventions.md"
+  else
+    skip ".ai/rules/conventions.md already exists"
+  fi
+
+  if [[ ! -f ".ai/skills/stack.md" ]]; then
+    cat > .ai/skills/stack.md <<EOF
+# Stack notes: ${project_name}
+
+<!-- Project-specific patterns, chosen libraries, setup notes -->
+<!-- Examples:
+- ORM: SQLAlchemy 2.0 with mapped_column style
+- Auth: JWT via python-jose, refresh rotation enabled
+- Background tasks: Celery + Redis
+-->
+EOF
+    success "created .ai/skills/stack.md"
+  else
+    skip ".ai/skills/stack.md already exists"
+  fi
+
+  # ── .gitignore additions ───────────────────────────────────────────────────
+  local gitignore_additions=".env
+.env.local
+__pycache__/
+*.pyc
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+dist/
+*.egg-info/
+"
+  if [[ -f ".gitignore" ]]; then
+    while IFS= read -r line; do
+      if ! grep -qxF "$line" .gitignore 2>/dev/null; then
+        echo "$line" >> .gitignore
+      fi
+    done <<< "$gitignore_additions"
+    success "updated .gitignore"
+  else
+    echo "$gitignore_additions" > .gitignore
+    success "created .gitignore"
+  fi
+
+  # ── Obsidian vault structure ──────────────────────────────────────────────
+  if obs_cli_available || obs_vault_set; then
+    info "creating Obsidian vault structure..."
+    AI_PROJECT="$project_name" obs_ensure_dirs
+    AI_PROJECT="$project_name" "${SCRIPT_DIR}/obs-write" --init 2>/dev/null \
+      && success "Obsidian structure created at $(obs_base_path)" \
+      || skip "Obsidian not available"
+  else
+    skip "Obsidian not configured — set OBSIDIAN_VAULT or install Obsidian CLI"
+  fi
+
+  # ── Summary ─────────────────────────────────────────────────────────────────
+  echo ""
+  echo "Done. Project: ${project_name}"
+  echo ""
+  echo "  Files created:"
+  echo "    AGENTS.md                — AI context (edit this)"
+  [[ -L "CLAUDE.md" ]] && echo "    CLAUDE.md                — symlink to AGENTS.md"
+  echo "    .ai/rules/conventions.md — project-specific rules"
+  echo "    .ai/skills/stack.md      — project stack notes"
+  echo ""
+  echo "  Obsidian path: $(obs_base_path)"
+  echo ""
+  echo "  Next steps:"
+  echo "    1. Fill in AGENTS.md (stack, conventions, decisions)"
+  echo "    2. ai-start              — begin a session"
+  echo "    3. obs-write --decision  — log decisions as you go"
+}
+
+# ── entry point ──────────────────────────────────────────────────────────────
+case "${1:-}" in
+  --global-install|-g)
+    global_install
+    ;;
+  "")
+    scaffold_project "$(basename "$PWD")"
+    ;;
+  --*)
+    echo "Unknown flag: $1" >&2
+    echo "Usage: ai-init [project-name] | --global-install" >&2
+    exit 1
+    ;;
+  *)
+    scaffold_project "$1"
+    ;;
+esac

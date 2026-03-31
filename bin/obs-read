@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# obs-read — pull context from Obsidian second brain
+# Mode-aware: Work (project-based) vs Self (topic-based)
+# Transport: Obsidian CLI (primary) → filesystem (fallback)
+#
+# Usage:
+#   obs-read                        # read current project/topic context
+#   obs-read --session              # read Session.md only (tasks for AI)
+#   obs-read --all                  # read all context (context + session + decisions)
+#
+# Env vars:
+#   AI_MODE                         # "work" or "self"
+#   AI_PROJECT                      # project name (defaults to basename $PWD)
+#   OBSIDIAN_VAULT                  # path to single Obsidian vault
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=obs-lib
+source "${SCRIPT_DIR}/obs-lib"
+
+SHOW_SESSION_ONLY=false
+SHOW_ALL=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --session) SHOW_SESSION_ONLY=true; shift ;;
+    --all)     SHOW_ALL=true; shift ;;
+    -h|--help)
+      echo "Usage: obs-read [--session | --all]"
+      echo "  (no flag)   project/topic context"
+      echo "  --session   Session.md tasks only"
+      echo "  --all       context + session + decisions + errors"
+      exit 0
+      ;;
+    *) shift ;;
+  esac
+done
+
+obs_require_vault
+obs_banner
+
+# ── Session tasks ───────────────────────────────────────────────────────────
+if [[ "$SHOW_SESSION_ONLY" == "true" ]] || [[ "$SHOW_ALL" == "true" ]]; then
+  SESSION_CONTENT=$(obs_read_note "$(obs_session_note)")
+  if [[ -n "$SESSION_CONTENT" ]]; then
+    echo "## Session Tasks"
+    echo "$SESSION_CONTENT"
+    echo ""
+  else
+    echo "(No Session.md found — run: obs-write --init)"
+    echo ""
+  fi
+fi
+
+# ── Main context (README.md or learnings.md) ────────────────────────────────
+if [[ "$SHOW_SESSION_ONLY" != "true" ]]; then
+  MAIN_CONTENT=$(obs_read_note "$(obs_context_note)")
+  if [[ -n "$MAIN_CONTENT" ]]; then
+    echo "## Context"
+    echo "$MAIN_CONTENT"
+    echo ""
+  else
+    echo "(No context note found — run: obs-write --init)"
+    echo ""
+  fi
+fi
+
+# ── Extended context ────────────────────────────────────────────────────────
+if [[ "$SHOW_ALL" == "true" ]]; then
+  # Decisions
+  echo "## Decisions"
+  DECISIONS_LOG=$(obs_read_note "$(obs_decisions_dir)/log.md")
+  if [[ -n "$DECISIONS_LOG" ]]; then
+    echo "$DECISIONS_LOG" | tail -20
+  else
+    echo "(none)"
+  fi
+  echo ""
+
+  # Recent errors/fixes
+  echo "## Recent Fixes"
+  ERRORS_LOG=$(obs_read_note "$(obs_errors_dir)/log.md")
+  if [[ -n "$ERRORS_LOG" ]]; then
+    echo "$ERRORS_LOG" | tail -10
+  else
+    echo "(none)"
+  fi
+  echo ""
+
+  # Skills
+  echo "## Skills"
+  SKILLS_LOG=$(obs_read_note "$(obs_skills_dir)/log.md")
+  if [[ -n "$SKILLS_LOG" ]]; then
+    echo "$SKILLS_LOG" | tail -10
+  else
+    echo "(none)"
+  fi
+  echo ""
+
+  # Cross-link: show notes from the other mode that reference this project
+  echo "## Cross-references"
+  CROSS=$(obs_search "${OBS_PROJECT}" 2>/dev/null | head -10)
+  if [[ -n "$CROSS" ]]; then
+    echo "$CROSS"
+  else
+    echo "(none)"
+  fi
+  echo ""
+fi
+
+obs_footer

@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+# build-context — assemble ~/.ai/context/ + Obsidian into a single prompt file
+#
+# This is the bridge between source-of-truth markdown files and
+# tool-specific config files. Single vault, CLI-first.
+#
+# Usage:
+#   build-context                  write to ~/.ai/prompts/global.md (default)
+#   build-context --stdout         print to stdout
+#   build-context --out FILE       write to specific file
+#   build-context --obsidian       include current Obsidian project context
+#   build-context --adapter TOOL   run adapter (claude-code | codex | opencode | all)
+#
+# Run this after editing ~/.ai/context/. Run with --obsidian to pull from Obsidian.
+
+set -euo pipefail
+
+AI_HOME="${AI_HOME:-$HOME/.ai}"
+CONTEXT_DIR="${AI_HOME}/context"
+PROMPT_DIR="${AI_HOME}/prompts"
+OUTPUT_FILE="${PROMPT_DIR}/global.md"
+STDOUT_MODE=false
+ADAPTER=""
+INCLUDE_OBSIDIAN=false
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=obs-lib
+source "${SCRIPT_DIR}/obs-lib"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --stdout)     STDOUT_MODE=true ;;
+    --out)        shift; OUTPUT_FILE="$1" ;;
+    --adapter)    shift; ADAPTER="$1" ;;
+    --obsidian)   INCLUDE_OBSIDIAN=true ;;
+    *) echo "Unknown arg: $1" >&2; exit 1 ;;
+  esac
+  shift
+done
+
+get_obsidian_context() {
+  local ctx=""
+  local base
+  base=$(obs_base_path)
+
+  # Main context file
+  local main_ctx
+  main_ctx=$(obs_read_note "$(obs_context_note)")
+  if [[ -n "$main_ctx" ]]; then
+    ctx="${ctx}
+
+## Obsidian: ${OBS_PROJECT} (${OBS_MODE})
+
+${main_ctx}"
+  fi
+
+  # Session.md (tasks for this session)
+  local session_ctx
+  session_ctx=$(obs_read_note "$(obs_session_note)")
+  if [[ -n "$session_ctx" ]]; then
+    ctx="${ctx}
+
+### Current Tasks (from Session.md)
+
+${session_ctx}"
+  fi
+
+  # Decisions (last entries)
+  local decisions
+  decisions=$(obs_read_note "$(obs_decisions_dir)/log.md")
+  if [[ -n "$decisions" ]]; then
+    ctx="${ctx}
+
+### Recent Decisions
+
+$(echo "$decisions" | tail -10)"
+  fi
+
+  echo "$ctx"
+}
+
+assemble() {
+  echo "# AI Dev — Global Context"
+  echo "# Generated: $(date +%Y-%m-%d\ %H:%M)"
+  echo "# Source: ${CONTEXT_DIR}"
+  if [[ "$INCLUDE_OBSIDIAN" == true ]]; then
+    echo "# Obsidian: ${OBS_MODE} mode, vault: ${OBS_VAULT:-<not set>}"
+  fi
+  echo ""
+
+  # Identity always first
+  if [[ -f "${CONTEXT_DIR}/identity.md" ]]; then
+    cat "${CONTEXT_DIR}/identity.md"
+    echo ""
+    echo "---"
+    echo ""
+  fi
+
+  # Rules
+  for f in "${CONTEXT_DIR}/rules/"*.md; do
+    [[ -f "$f" ]] || continue
+    cat "$f"
+    echo ""
+    echo "---"
+    echo ""
+  done
+
+  # Skills
+  echo "# Skills available"
+  echo ""
+  echo "Detailed skill files in ~/.ai/context/skills/. Reference them when relevant:"
+  for f in "${CONTEXT_DIR}/skills/"*.md; do
+    [[ -f "$f" ]] || continue
+    name=$(basename "$f" .md)
+    first_line=$(grep -m1 "^# " "$f" | sed 's/^# //')
+    echo "- \`${name}\`: ${first_line}"
+  done
+  echo ""
+  echo "---"
+  echo ""
+
+  # Agents
+  echo "# Agents"
+  echo ""
+  for f in "${CONTEXT_DIR}/agents/"*.md; do
+    [[ -f "$f" ]] || continue
+    cat "$f"
+    echo ""
+  done
+
+  # Project context hook
+  echo "---"
+  echo ""
+  echo "# Project context"
+  echo ""
+  echo "At session start: read AGENTS.md in project root."
+  if [[ "$INCLUDE_OBSIDIAN" == true ]]; then
+    echo "Run \`obs-read --all\` to pull current context from Obsidian (${OBS_MODE} mode)."
+  else
+    echo "Run \`obs-read\` or \`obs-read --all\` to pull context from Obsidian."
+  fi
+  echo "Project-specific rules override global rules when they conflict."
+  echo ""
+  echo "Cross-reference: use \`obs-search --cross <query>\` to find related notes"
+  echo "across both Work/Projects and Self/Topics in the same vault."
+  echo ""
+
+  # Include Obsidian context if requested
+  if [[ "$INCLUDE_OBSIDIAN" == true ]]; then
+    local obsidian_ctx
+    obsidian_ctx=$(get_obsidian_context)
+    if [[ -n "$obsidian_ctx" ]]; then
+      echo "---"
+      echo ""
+      echo "$obsidian_ctx"
+    fi
+  fi
+}
+
+# Output
+if [[ "$STDOUT_MODE" == true ]]; then
+  assemble
+  exit 0
+fi
+
+mkdir -p "$PROMPT_DIR"
+assemble > "$OUTPUT_FILE"
+echo "[build-context] wrote: ${OUTPUT_FILE} ($(wc -l < "$OUTPUT_FILE") lines)"
+
+# Adapters
+run_adapter() {
+  local tool="$1"
+  local adapter_script="${AI_HOME}/bin/adapters/adapter-${tool}.sh"
+
+  if [[ -x "$adapter_script" ]]; then
+    echo "[build-context] running adapter: ${tool}"
+    bash "$adapter_script" "$OUTPUT_FILE"
+  else
+    echo "[build-context] no adapter found for: ${tool}"
+  fi
+}
+
+case "$ADAPTER" in
+  "")         ;;
+  all)        for t in claude-code codex opencode; do run_adapter "$t"; done ;;
+  *)          run_adapter "$ADAPTER" ;;
+esac

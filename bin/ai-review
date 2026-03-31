@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+# ai-review — run mechanical checks then assemble context for AI review
+# Works standalone (linters only) or pipes context to the configured AI tool.
+#
+# Usage:
+#   ai-review                  full review (linters + AI)
+#   ai-review --lint-only      skip AI, run linters only
+#   ai-review --staged         review staged diff only (default: HEAD diff)
+#   ai-review --file path.py   review a specific file
+#
+# Env:
+#   AI_TOOL   claude | opencode | codex | none  (default: auto-detect)
+
+set -euo pipefail
+
+LINT_ONLY=false
+DIFF_TARGET="HEAD"
+FILE_TARGET=""
+PASS=0
+FAIL=0
+
+# ── argument parse ─────────────────────────────────────────────────────────
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --lint-only) LINT_ONLY=true ;;
+    --staged)    DIFF_TARGET="--staged" ;;
+    --file)      shift; FILE_TARGET="$1" ;;
+    *) echo "Unknown arg: $1" >&2; exit 1 ;;
+  esac
+  shift
+done
+
+sep()  { echo ""; echo "── $* ──"; }
+ok()   { echo "  [pass] $*"; ((PASS++)) || true; }
+fail() { echo "  [FAIL] $*"; ((FAIL++)) || true; }
+skip() { echo "  [skip] $*"; }
+
+# ── mechanical checks (no AI needed) ──────────────────────────────────────
+sep "Linters"
+
+if command -v uv &>/dev/null; then
+  if uv run ruff check . --quiet 2>/dev/null; then
+    ok "ruff"
+  else
+    uv run ruff check . 2>&1 | head -20
+    fail "ruff — fix above before continuing"
+  fi
+
+  if uv run black --check . --quiet 2>/dev/null; then
+    ok "black"
+  else
+    fail "black — run 'uv run black .' to fix"
+  fi
+
+  if uv run mypy src/ --ignore-missing-imports --no-error-summary 2>/dev/null | grep -q "^src/"; then
+    uv run mypy src/ --ignore-missing-imports 2>&1 | grep "^src/" | head -10
+    fail "mypy — type errors found"
+  else
+    ok "mypy"
+  fi
+else
+  skip "uv not found — skipping Python linters"
+fi
+
+sep "Security (bandit)"
+if command -v uv &>/dev/null && uv run bandit --version &>/dev/null 2>&1; then
+  if uv run bandit -r src/ -ll -q 2>/dev/null; then
+    ok "bandit — no high severity issues"
+  else
+    fail "bandit — security issues found"
+  fi
+else
+  skip "bandit not installed (add to dev deps)"
+fi
+
+sep "Secret scan"
+if git grep -En "(password|api_key|secret|token)\s*=\s*['\"][^'\"]" -- '*.py' 2>/dev/null | \
+   grep -v "\.env\|example\|test\|placeholder\|your-key" | head -5; then
+  fail "possible hardcoded secrets found above"
+else
+  ok "no obvious hardcoded secrets"
+fi
+
+sep "Test suite"
+if command -v uv &>/dev/null; then
+  if uv run pytest --tb=short -q 2>&1 | tail -5; then
+    ok "tests passed"
+  else
+    fail "tests failing"
+  fi
+else
+  skip "uv not found — skipping tests"
+fi
+
+# ── summary ────────────────────────────────────────────────────────────────
+echo ""
+echo "Mechanical: ${PASS} passed, ${FAIL} failed"
+
+if [[ "$LINT_ONLY" == true ]]; then
+  [[ $FAIL -gt 0 ]] && exit 1 || exit 0
+fi
+
+if [[ $FAIL -gt 0 ]]; then
+  echo "Fix mechanical failures before AI review."
+  exit 1
+fi
+
+# ── assemble AI review context ─────────────────────────────────────────────
+sep "Assembling review context"
+
+CONTEXT_FILE=$(mktemp /tmp/ai-review-context-XXXXXX.md)
+trap 'rm -f "$CONTEXT_FILE"' EXIT
+
+{
+  echo "# Code review request"
+  echo ""
+  echo "## Project context"
+  [[ -f AGENTS.md ]] && cat AGENTS.md || echo "(no AGENTS.md found)"
+  echo ""
+  echo "## Diff to review"
+  echo '```diff'
+  if [[ -n "$FILE_TARGET" ]]; then
+    git diff HEAD -- "$FILE_TARGET"
+  elif [[ "$DIFF_TARGET" == "--staged" ]]; then
+    git diff --staged
+  else
+    git diff HEAD
+  fi
+  echo '```'
+  echo ""
+  echo "## Review instructions"
+  echo "Four passes. Only report findings with confidence ≥ 80. Score each."
+  echo ""
+  echo "Pass 1 — AGENTS.md compliance: violations of stated conventions or rules."
+  echo "Pass 2 — Bug detection: logic errors, missing validation, edge cases, unhandled exceptions."
+  echo "Pass 3 — Security: injection, hardcoded secrets, unsafe deserialization, SQL formatting."
+  echo "Pass 4 — Git context: check git log for regressions vs intentional changes."
+  echo ""
+  echo "Format: [score] file:line — issue"
+  echo "End with: N findings. [Safe to commit / Fix before committing]"
+  echo "Block on any finding ≥ 90. Warn for 80–89."
+} > "$CONTEXT_FILE"
+
+echo "Review context written to: $CONTEXT_FILE"
+echo ""
+
+# ── dispatch to AI tool ─────────────────────────────────────────────────────
+AI_TOOL="${AI_TOOL:-auto}"
+
+if [[ "$AI_TOOL" == "auto" ]]; then
+  if   command -v claude    &>/dev/null; then AI_TOOL="claude"
+  elif command -v opencode  &>/dev/null; then AI_TOOL="opencode"
+  elif command -v codex     &>/dev/null; then AI_TOOL="codex"
+  else                                        AI_TOOL="none"
+  fi
+fi
+
+case "$AI_TOOL" in
+  claude)
+    echo "Running: claude (pipe mode)"
+    claude --print < "$CONTEXT_FILE"
+    ;;
+  opencode)
+    echo "Running: opencode"
+    opencode run --context "$CONTEXT_FILE"
+    ;;
+  codex)
+    echo "Running: codex"
+    codex --instructions "$(cat "$CONTEXT_FILE")" "Run the code review described above."
+    ;;
+  none)
+    echo "No AI tool found (set AI_TOOL=claude|opencode|codex or install one)."
+    echo "Review context saved — paste into your AI tool manually:"
+    echo ""
+    cat "$CONTEXT_FILE"
+    ;;
+  *)
+    echo "Unknown AI_TOOL: ${AI_TOOL}" >&2
+    exit 1
+    ;;
+esac

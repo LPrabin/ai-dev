@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# ai-ship — pre-ship checklist. Run before opening a PR or deploying.
+# Fails fast on any blocking issue.
+
+set -euo pipefail
+
+PASS=0
+FAIL=0
+WARN=0
+
+ok()   { echo "  [pass] $*"; ((PASS++)) || true; }
+fail() { echo "  [FAIL] $*"; ((FAIL++)) || true; }
+warn() { echo "  [warn] $*"; ((WARN++)) || true; }
+sep()  { echo ""; echo "── $* ──"; }
+
+sep "Tests"
+if uv run pytest --tb=short -q 2>&1 | tail -3; then
+  ok "all tests passed"
+else
+  fail "tests failing — fix before shipping"
+fi
+
+sep "Type checking"
+MYPY_OUT=$(uv run mypy src/ --ignore-missing-imports 2>&1 || true)
+if echo "$MYPY_OUT" | grep -q "^src/.*error:"; then
+  echo "$MYPY_OUT" | grep "^src/.*error:" | head -5
+  fail "mypy errors on new code"
+else
+  ok "mypy clean"
+fi
+
+sep "Linting"
+if uv run ruff check . --quiet && uv run black --check . --quiet; then
+  ok "ruff + black clean"
+else
+  fail "lint errors — run 'uv run ruff check . && uv run black .'"
+fi
+
+sep "Security (bandit)"
+if uv run bandit -r src/ -ll -q 2>/dev/null; then
+  ok "no high severity issues"
+else
+  fail "bandit found high severity issues"
+fi
+
+sep "Dependency audit"
+if uv run pip-audit --quiet 2>/dev/null; then
+  ok "no known CVEs"
+else
+  warn "pip-audit found vulnerabilities — review before shipping"
+fi
+
+sep "Hardcoded secrets"
+SECRETS=$(git grep -En \
+  "(password|api_key|secret|token)\s*=\s*['\"][^'\"]{4,}" \
+  -- '*.py' 2>/dev/null | \
+  grep -v "\.env\|example\|test\|placeholder\|your.key\|test.key" || true)
+if [[ -z "$SECRETS" ]]; then
+  ok "no obvious hardcoded secrets"
+else
+  echo "$SECRETS" | head -5
+  fail "possible hardcoded secrets found"
+fi
+
+sep "Uncommitted changes"
+if git diff --quiet && git diff --staged --quiet; then
+  ok "working tree clean"
+else
+  warn "uncommitted changes — make sure they're intentional"
+fi
+
+sep "Branch check"
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+if [[ "$BRANCH" == "main" || "$BRANCH" == "master" ]]; then
+  fail "on $BRANCH — ship from a feature branch, not main"
+else
+  ok "on branch: ${BRANCH}"
+fi
+
+sep "PR description"
+warn "verify PR description includes: what changed, why, how to test, migration steps"
+
+# ── summary ─────────────────────────────────────────────────────────────────
+echo ""
+echo "══════════════════════════════"
+echo " Tests:    ${PASS} passed"
+echo " Failures: ${FAIL}"
+echo " Warnings: ${WARN}"
+echo "══════════════════════════════"
+
+if [[ $FAIL -gt 0 ]]; then
+  echo "SHIP STATUS: NOT READY — fix failures above"
+  exit 1
+elif [[ $WARN -gt 0 ]]; then
+  echo "SHIP STATUS: Ready with ${WARN} warning(s) — review before merging"
+else
+  echo "SHIP STATUS: Ready"
+
+  # Log the ship to Obsidian if obs-write is available
+  if command -v obs-write &>/dev/null; then
+    BRANCH=$(git rev-parse --abbrev-ref HEAD)
+    COMMIT=$(git log --oneline -1)
+    obs-write --decision "Shipped branch ${BRANCH} — ${COMMIT}" 2>/dev/null || true
+  fi
+fi

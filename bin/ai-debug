@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# ai-debug — systematic debugging protocol
+# Gathers diagnostic context then optionally routes to AI tool.
+#
+# Usage:
+#   ai-debug                           interactive: guide through protocol
+#   ai-debug --test path/to/test.py    run failing test and capture context
+#   ai-debug --error "paste error"     analyse a pasted error
+#   ai-debug --slow                    profile slow code
+#
+# The script gathers facts. The AI explains. Don't guess before running this.
+
+set -euo pipefail
+
+MODE="interactive"
+TEST_PATH=""
+ERROR_TEXT=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --test)  shift; TEST_PATH="$1"; MODE="test" ;;
+    --error) shift; ERROR_TEXT="$1"; MODE="error" ;;
+    --slow)  MODE="profile" ;;
+    *) echo "Unknown arg: $1" >&2; exit 1 ;;
+  esac
+  shift
+done
+
+sep() { echo ""; echo "── $* ──"; echo ""; }
+
+# ── collect diagnostic context ───────────────────────────────────────────────
+DIAG_FILE=$(mktemp /tmp/ai-debug-XXXXXX.md)
+trap 'rm -f "$DIAG_FILE"' EXIT
+
+{
+  echo "# Debug session: $(basename "$PWD")"
+  echo "Date: $(date)"
+  echo ""
+
+  echo "## Environment"
+  python3 --version 2>/dev/null || true
+  uv --version 2>/dev/null || true
+  echo "Branch: $(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'not a git repo')"
+  echo "Last commit: $(git log --oneline -1 2>/dev/null || true)"
+  echo ""
+
+  echo "## Recent git changes"
+  git diff --stat HEAD~3 2>/dev/null | head -20 || true
+  echo ""
+} > "$DIAG_FILE"
+
+case "$MODE" in
+
+  test)
+    sep "Running failing test"
+    echo "Test: ${TEST_PATH}"
+    echo ""
+    {
+      echo "## Failing test output"
+      echo '```'
+      uv run pytest "$TEST_PATH" -xvs 2>&1 || true
+      echo '```'
+      echo ""
+      echo "## Test file"
+      echo '```python'
+      cat "$TEST_PATH" 2>/dev/null || echo "(file not found)"
+      echo '```'
+    } >> "$DIAG_FILE"
+    ;;
+
+  error)
+    {
+      echo "## Error to analyse"
+      echo '```'
+      echo "$ERROR_TEXT"
+      echo '```'
+    } >> "$DIAG_FILE"
+    ;;
+
+  profile)
+    sep "Profile mode"
+    echo "Which script to profile? (path to .py file)"
+    read -r SCRIPT_PATH
+    {
+      echo "## Profile output"
+      echo '```'
+      uv run python -m cProfile -s cumulative "$SCRIPT_PATH" 2>&1 | head -30 || true
+      echo '```'
+    } >> "$DIAG_FILE"
+    ;;
+
+  interactive)
+    sep "Debug protocol"
+    cat <<'PROTOCOL'
+Follow these steps IN ORDER. No random changes.
+
+  1. Reproduce reliably
+     uv run pytest path/to/test.py::test_name -xvs
+
+  2. Read the FULL traceback — top to bottom
+     Find YOUR code frame (not library frames)
+
+  3. Narrow the boundary
+     Last point state was correct vs first point it wasn't
+     Use: import pdb; pdb.set_trace()
+     Or:  uv run pytest -x --pdb
+
+  4. State a hypothesis BEFORE changing code
+     "The bug is X because Y" — write it down
+
+  5. Write a failing test that captures the bug
+
+  6. Fix minimally — smallest change that passes
+
+  7. uv run pytest -q — all green
+
+  8. Root cause: "<what> — <why>"
+
+PROTOCOL
+    echo "Paste the failing test path (or press Enter to skip):"
+    read -r TEST_INPUT
+    if [[ -n "$TEST_INPUT" ]]; then
+      {
+        echo "## Failing test output"
+        echo '```'
+        uv run pytest "$TEST_INPUT" -xvs 2>&1 || true
+        echo '```'
+      } >> "$DIAG_FILE"
+    fi
+    ;;
+esac
+
+# ── append debugging instructions ────────────────────────────────────────────
+cat >> "$DIAG_FILE" <<'INSTRUCTIONS'
+
+## Debug task
+Analyse the information above. Follow this protocol:
+
+1. Identify which frame in the traceback is the actual bug location (not library code).
+2. State the root cause as: "The bug is X because Y."
+3. If the cause is unclear from the info above, specify exactly what additional information would confirm the hypothesis — don't guess.
+4. Write a minimal failing test that captures the bug.
+5. Write the minimal fix.
+6. State the root cause summary: "Root cause: <what> — <why>"
+
+Do NOT suggest multiple possible fixes. Diagnose first, then fix.
+INSTRUCTIONS
+
+# ── dispatch ─────────────────────────────────────────────────────────────────
+sep "Diagnostic context assembled"
+echo "File: ${DIAG_FILE}"
+echo ""
+
+AI_TOOL="${AI_TOOL:-auto}"
+if [[ "$AI_TOOL" == "auto" ]]; then
+  if   command -v claude   &>/dev/null; then AI_TOOL="claude"
+  elif command -v opencode &>/dev/null; then AI_TOOL="opencode"
+  elif command -v codex    &>/dev/null; then AI_TOOL="codex"
+  else                                       AI_TOOL="none"
+  fi
+fi
+
+case "$AI_TOOL" in
+  claude)    claude --print < "$DIAG_FILE" ;;
+  opencode)  opencode run --context "$DIAG_FILE" ;;
+  codex)     codex --instructions "$(cat "$DIAG_FILE")" "Debug the issue described above." ;;
+  none)
+    echo "No AI tool found. Diagnostic context:"
+    echo ""
+    cat "$DIAG_FILE"
+    ;;
+esac

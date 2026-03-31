@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# ai-mode — switch between Work and Self modes
+# Single vault with folder-based separation
+#
+# Usage:
+#   ai-mode                    # show current mode + status
+#   ai-mode work               # switch to work mode
+#   ai-mode self               # switch to self mode
+#   ai-mode --init             # create vault directories
+#   ai-mode --list             # list all projects/topics
+#
+# Env vars (set in ~/.zshrc):
+#   AI_MODE                    # "work" or "self"
+#   OBSIDIAN_VAULT             # path to single vault
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=obs-lib
+source "${SCRIPT_DIR}/obs-lib"
+
+show_status() {
+  echo "ai-dev status"
+  echo "─────────────────────────────────────"
+  echo "  Mode:      ${OBS_MODE}"
+  echo "  Project:   ${OBS_PROJECT}"
+  echo "  Vault:     ${OBS_VAULT:-<not set>}"
+  echo ""
+
+  # Transport
+  local transport="none"
+  if obs_cli_available; then
+    transport="Obsidian CLI"
+  elif obs_vault_set; then
+    transport="filesystem"
+  fi
+  echo "  Transport: ${transport}"
+  echo ""
+
+  # Show current project/topic status
+  if obs_vault_set || obs_cli_available; then
+    local ctx
+    ctx=$(obs_read_note "$(obs_session_note)")
+    if [[ -n "$ctx" ]]; then
+      echo "  Session tasks:"
+      echo "$ctx" | grep -E "^\s*- \[" | head -5 | sed 's/^/    /'
+    else
+      echo "  (no active session — run: obs-write --init)"
+    fi
+  fi
+  echo ""
+}
+
+list_all() {
+  echo "=== Projects (Work) ==="
+  if obs_vault_set && [[ -d "${OBS_VAULT}/Work/Projects" ]]; then
+    for d in "${OBS_VAULT}/Work/Projects/"*/; do
+      [[ -d "$d" ]] || continue
+      local name
+      name=$(basename "$d")
+      local session="${d}Session.md"
+      local tasks=""
+      if [[ -f "$session" ]]; then
+        tasks=$(grep -c "- \[ \]" "$session" 2>/dev/null || echo "0")
+        tasks=" (${tasks} open tasks)"
+      fi
+      echo "  ${name}${tasks}"
+    done
+  else
+    echo "  (none)"
+  fi
+  echo ""
+
+  echo "=== Topics (Self) ==="
+  if obs_vault_set && [[ -d "${OBS_VAULT}/Self/Topics" ]]; then
+    for d in "${OBS_VAULT}/Self/Topics/"*/; do
+      [[ -d "$d" ]] || continue
+      local name
+      name=$(basename "$d")
+      echo "  ${name}"
+    done
+  else
+    echo "  (none)"
+  fi
+}
+
+init_vault() {
+  if ! obs_vault_set; then
+    echo "ERROR: OBSIDIAN_VAULT not set" >&2
+    echo "Add to ~/.zshrc:"
+    echo '  export OBSIDIAN_VAULT="$HOME/Documents/Brain"'
+    return 1
+  fi
+
+  echo "Initializing vault: ${OBS_VAULT}"
+  echo ""
+
+  # Single vault, two top-level folders
+  mkdir -p "${OBS_VAULT}/Work/Projects"
+  mkdir -p "${OBS_VAULT}/Self/Topics"
+  mkdir -p "${OBS_VAULT}/Library/Decisions"
+  mkdir -p "${OBS_VAULT}/Library/Skills"
+  mkdir -p "${OBS_VAULT}/Library/Errors"
+
+  echo "Created:"
+  echo "  ${OBS_VAULT}/Work/Projects/   — project-based work"
+  echo "  ${OBS_VAULT}/Self/Topics/     — learning & exploration"
+  echo "  ${OBS_VAULT}/Library/         — cross-cutting knowledge"
+  echo ""
+  echo "Vault initialized. One vault, two modes, full cross-linking."
+}
+
+case "${1:-}" in
+  work)
+    export AI_MODE="work"
+    echo "Switched to Work mode"
+    echo "Active path: Work/Projects/${OBS_PROJECT}"
+    ;;
+  self)
+    export AI_MODE="self"
+    echo "Switched to Self mode"
+    echo "Active path: Self/Topics/${OBS_PROJECT}"
+    ;;
+  -i|--init)
+    init_vault
+    ;;
+  -l|--list)
+    list_all
+    ;;
+  "")
+    show_status
+    ;;
+  -h|--help)
+    echo "Usage: ai-mode [work|self|--init|--list]"
+    echo "  (no args)  show current status"
+    echo "  work       switch to work mode"
+    echo "  self       switch to self mode"
+    echo "  --init     create vault directories"
+    echo "  --list     list all projects and topics"
+    ;;
+  *)
+    echo "Unknown mode: $1 (use 'work' or 'self')" >&2
+    exit 1
+    ;;
+esac
