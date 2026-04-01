@@ -38,9 +38,36 @@ ai-ship                                  # pre-ship checklist
 ## What not to touch
 <!-- Fragile areas, legacy code, known footguns -->
 
-## Obsidian
-`Work/Projects/{{PROJECT_NAME}}/` — session context, decisions, skills, and bug log.
-Run `ai-start` at session start. Run `obs-write` at session end.
+## Second Brain (Obsidian)
+
+This project has a persistent knowledge base in Obsidian that survives across sessions.
+
+**Vault path**: `Work/Projects/{{PROJECT_NAME}}/`
+
+| What | Where | Purpose |
+|------|-------|---------|
+| Session logs | `Sessions/YYYY-MM-DD.md` | Daily work history |
+| Decisions | `Decisions/log.md` | Why we chose X over Y |
+| Skills | `Skills/log.md` | Patterns learned in this project |
+| Errors | `Errors/log.md` | Bugs found and how they were fixed |
+| Global skills | `Library/Skills/` | Cross-project patterns |
+| Cross-refs | Obsidian `[[wikilinks]]` | Links to related projects/topics |
+
+**Commands**:
+- `ai-start` — begin session (auto-inits if needed)
+- `obs-read --all` — pull full context from vault
+- `obs-write --decision "text"` — log a decision
+- `obs-write --fix "text"` — log a bug fix
+- `obs-write --skill "text"` — log a pattern
+- `obs-search --cross "query"` — search across all projects and topics
+- `obs-write` — end-of-session log
+
+**When to use the second brain**:
+- Before starting work: `obs-read` to recall prior context
+- After making a non-obvious choice: `obs-write --decision`
+- After fixing a tricky bug: `obs-write --fix`
+- After learning something reusable: `obs-write --skill`
+- To find related past work: `obs-search --cross`
 
 ---
 <!-- Inherits global rules from ~/.ai/context/ | Generated: {{DATE}} -->

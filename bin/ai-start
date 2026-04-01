@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 # ai-start — begin an AI dev session
-# Chains: mode check -> obs-read -> build-context -> show status
+# Auto-detects project state and initializes what's missing.
+#
+# Flow:
+#   1. Check vault access (env, CLI)
+#   2. Check if Obsidian project exists → auto-init if not
+#   3. Check if local AI config exists → scaffold if not
+#   4. Pull and display session context
 #
 # Usage:
 #   ai-start                  # start session in current mode
 #   ai-start work             # switch to work mode and start
 #   ai-start self             # switch to self mode and start
 #   ai-start --rebuild        # also rebuild context and push to all tools
-#
-# This is the single command you run at the start of every session.
 
 set -euo pipefail
 
@@ -53,8 +57,63 @@ elif obs_vault_set; then
   echo "CLI:     not found (using filesystem)"
 else
   echo "CLI:     not found, vault not set"
+  echo ""
+  echo "[warn] Set OBSIDIAN_VAULT in your shell rc, then: source ~/.zshrc"
 fi
 echo ""
+
+# ── Auto-init ───────────────────────────────────────────────────────────────
+VAULT_EXISTS=true
+if obs_cli_available || obs_vault_set; then
+  obs_project_exists || VAULT_EXISTS=false
+fi
+
+if ! obs_local_has_ai_config; then
+  # No local config — ai-init handles both local scaffold AND vault init
+  echo "── Initializing Project ────────────────"
+  echo "  No AGENTS.md or .ai/ found in project."
+
+  if [[ -x "${SCRIPT_DIR}/ai-init" ]]; then
+    echo "  Running ai-init to scaffold..."
+    echo ""
+    "${SCRIPT_DIR}/ai-init" "${OBS_PROJECT}"
+    echo ""
+  else
+    echo "  [warn] ai-init not found — create AGENTS.md manually."
+  fi
+elif [[ "$VAULT_EXISTS" == false ]]; then
+  # Local config exists but no vault project — init vault only
+  echo "── Initializing Obsidian Project ────────"
+  echo "  Found local config but no vault structure for '${OBS_PROJECT}'."
+
+  # Seed Obsidian README from AGENTS.md if present
+  if [[ -f "AGENTS.md" ]]; then
+    echo "  Seeding vault from AGENTS.md."
+    obs_ensure_dirs
+    obs_overwrite_note "$(obs_context_note)" "$(cat AGENTS.md)"
+  else
+    obs_ensure_dirs
+  fi
+
+  # Create Session.md
+  local_session="# Session — ${OBS_DATE}
+
+## Tasks
+- [ ]
+
+## Notes
+-
+"
+  obs_overwrite_note "$(obs_session_note)" "$local_session"
+
+  # Create log files
+  obs_overwrite_note "$(obs_decisions_dir)/log.md" "# Decisions — ${OBS_PROJECT}"
+  obs_overwrite_note "$(obs_skills_dir)/log.md" "# Skills — ${OBS_PROJECT}"
+  obs_overwrite_note "$(obs_errors_dir)/log.md" "# Errors & Fixes — ${OBS_PROJECT}"
+
+  echo "  Created: $(obs_base_path)/"
+  echo ""
+fi
 
 # ── Pull context ────────────────────────────────────────────────────────────
 echo "── Session Context ──────────────────────"
@@ -65,19 +124,19 @@ SESSION=$(obs_read_note "$(obs_session_note)")
 if [[ -n "$SESSION" ]]; then
   echo "$SESSION"
 else
-  echo "(No session found — run: obs-write --init)"
+  echo "(No session found)"
 fi
 echo ""
 
 # Show open tasks count
 if [[ -n "$SESSION" ]]; then
-  OPEN=$(echo "$SESSION" | grep -c "- \[ \]" || true)
-  DONE=$(echo "$SESSION" | grep -c "- \[x\]" || true)
+  OPEN=$(echo "$SESSION" | grep -c -e '- \[ \]' || true)
+  DONE=$(echo "$SESSION" | grep -c -e '- \[x\]' || true)
   echo "Tasks: ${OPEN} open, ${DONE} done"
   echo ""
 fi
 
-# Show recent decisions (last 3)
+# Show recent decisions (last 5)
 echo "── Recent Decisions ────────────────────"
 DECISIONS=$(obs_read_note "$(obs_decisions_dir)/log.md")
 if [[ -n "$DECISIONS" ]]; then
@@ -105,6 +164,35 @@ if [[ "$REBUILD" == true ]]; then
   "${SCRIPT_DIR}/build-context" --obsidian --adapter all
   echo ""
 fi
+
+# ── Second brain status ─────────────────────────────────────────────────────
+echo "── Second Brain ────────────────────────"
+if obs_vault_set; then
+  # Count project skills and decisions
+  SKILL_COUNT=0
+  DECISION_COUNT=0
+  SKILLS_FILE="${OBS_VAULT}/$(obs_skills_dir)/log.md"
+  DECISIONS_FILE="${OBS_VAULT}/$(obs_decisions_dir)/log.md"
+  [[ -f "$SKILLS_FILE" ]] && SKILL_COUNT=$(grep -c -e "^- \[" "$SKILLS_FILE" 2>/dev/null | tr -d '[:space:]') && SKILL_COUNT=${SKILL_COUNT:-0}
+  [[ -f "$DECISIONS_FILE" ]] && DECISION_COUNT=$(grep -c -e "^- \[" "$DECISIONS_FILE" 2>/dev/null | tr -d '[:space:]') && DECISION_COUNT=${DECISION_COUNT:-0}
+  echo "  Vault:     ${OBS_VAULT}"
+  echo "  Project:   $(obs_base_path)"
+  echo "  Decisions: ${DECISION_COUNT} logged"
+  echo "  Skills:    ${SKILL_COUNT} logged"
+
+  # Show global skills count
+  GLOBAL_SKILLS="${OBS_VAULT}/Library/Skills"
+  if [[ -d "$GLOBAL_SKILLS" ]]; then
+    G_COUNT=$(find "$GLOBAL_SKILLS" -name "*.md" 2>/dev/null | wc -l | tr -d ' ')
+    echo "  Global:    ${G_COUNT} skills in Library"
+  fi
+elif obs_cli_available; then
+  echo "  Transport: Obsidian CLI"
+  echo "  Project:   $(obs_base_path)"
+else
+  echo "  (not connected — set OBSIDIAN_VAULT)"
+fi
+echo ""
 
 # ── Ready ───────────────────────────────────────────────────────────────────
 echo "────────────────────────────────────────"

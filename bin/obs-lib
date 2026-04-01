@@ -82,11 +82,17 @@ obs_session_file()   { echo "$(obs_sessions_dir)/${OBS_DATE}.md"; }
 
 obs_read_note() {
   local note="$1"
+  # Prefer filesystem (faster, no indexing lag) when vault path is set
+  if obs_vault_set; then
+    local fspath="${OBS_VAULT}/${note}"
+    if [[ -f "$fspath" ]]; then
+      cat "$fspath"
+      return
+    fi
+  fi
+  # Fall back to CLI
   if obs_cli_available; then
     obsidian read $(_obs_vault_arg) path="${note}" 2>/dev/null || echo ""
-  elif obs_vault_set; then
-    local path="${OBS_VAULT}/${note}"
-    [[ -f "$path" ]] && cat "$path" || echo ""
   else
     echo ""
   fi
@@ -96,14 +102,14 @@ obs_read_note() {
 
 obs_write_note() {
   local note="$1" content="$2"
-  if obs_cli_available; then
-    # Try append first (works if note exists), fall back to create
+  # Prefer filesystem (no indexing lag, no duplicate writes)
+  if obs_vault_set; then
+    local fspath="${OBS_VAULT}/${note}"
+    mkdir -p "$(dirname "$fspath")"
+    echo "$content" >> "$fspath"
+  elif obs_cli_available; then
     obsidian append $(_obs_vault_arg) path="${note}" content="${content}" silent 2>/dev/null \
-      || obsidian create $(_obs_vault_arg) name="${note}" content="${content}" silent 2>/dev/null
-  elif obs_vault_set; then
-    local path="${OBS_VAULT}/${note}"
-    mkdir -p "$(dirname "$path")"
-    echo "$content" >> "$path"
+      || obsidian create $(_obs_vault_arg) path="${note}" content="${content}" silent 2>/dev/null
   else
     obs_die "No transport available. Set OBSIDIAN_VAULT or install Obsidian CLI (v1.12+)"
   fi
@@ -111,14 +117,14 @@ obs_write_note() {
 
 obs_overwrite_note() {
   local note="$1" content="$2"
-  if obs_cli_available; then
-    # Create with overwrite flag, or create new
-    obsidian create $(_obs_vault_arg) name="${note}" content="${content}" silent overwrite 2>/dev/null \
-      || obsidian create $(_obs_vault_arg) name="${note}" content="${content}" silent 2>/dev/null
-  elif obs_vault_set; then
-    local path="${OBS_VAULT}/${note}"
-    mkdir -p "$(dirname "$path")"
-    echo "$content" > "$path"
+  # Prefer filesystem (no indexing lag, no duplicate writes)
+  if obs_vault_set; then
+    local fspath="${OBS_VAULT}/${note}"
+    mkdir -p "$(dirname "$fspath")"
+    echo "$content" > "$fspath"
+  elif obs_cli_available; then
+    obsidian create $(_obs_vault_arg) path="${note}" content="${content}" silent overwrite 2>/dev/null \
+      || obsidian create $(_obs_vault_arg) path="${note}" content="${content}" silent 2>/dev/null
   else
     obs_die "No transport available. Set OBSIDIAN_VAULT or install Obsidian CLI (v1.12+)"
   fi
@@ -218,6 +224,28 @@ obs_list_dir() {
   fi
 }
 
+# ── project detection ──────────────────────────────────────────────────────
+
+obs_project_exists() {
+  # Check if vault project structure exists (any transport)
+  local base
+  base=$(obs_base_path)
+  if obs_vault_set; then
+    [[ -d "${OBS_VAULT}/${base}" ]]
+  elif obs_cli_available; then
+    local result
+    result=$(obsidian read $(_obs_vault_arg) path="${base}/Session.md" 2>/dev/null) || return 1
+    [[ -n "$result" ]]
+  else
+    return 1
+  fi
+}
+
+obs_local_has_ai_config() {
+  # Check if current directory has AI config files
+  [[ -f "AGENTS.md" ]] || [[ -f "CLAUDE.md" ]] || [[ -d ".ai" ]] || [[ -d ".claude" ]]
+}
+
 # ── mkdir ───────────────────────────────────────────────────────────────────
 
 obs_ensure_dirs() {
@@ -238,7 +266,9 @@ obs_ensure_dirs() {
 obs_die() { echo "[obs] error: $*" >&2; exit 1; }
 
 obs_banner() {
-  echo "=== Obsidian [${OBS_MODE^^}] ${OBS_PROJECT} ==="
+  local mode_upper
+  mode_upper=$(echo "$OBS_MODE" | tr '[:lower:]' '[:upper:]')
+  echo "=== Obsidian [${mode_upper}] ${OBS_PROJECT} ==="
   echo ""
 }
 
