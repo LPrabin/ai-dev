@@ -19,6 +19,58 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=obs-lib
 source "${SCRIPT_DIR}/obs-lib"
 
+# Mode switching paths
+AI_HOME="${AI_HOME:-$HOME/.ai}"
+CONTEXT_DIR="${AI_HOME}/context"
+MODES_DIR="${AI_HOME}/modes"
+
+switch_mode() {
+  local mode="$1"
+  local mode_dir="${MODES_DIR}/${mode}"
+  
+  if [[ ! -d "$mode_dir" ]]; then
+    echo "[ai-mode] error: mode directory not found: ${mode_dir}" >&2
+    echo "Run: ai-mode --init-modes" >&2
+    return 1
+  fi
+  
+  # Remove existing symlink or backup directory
+  if [[ -L "$CONTEXT_DIR" ]]; then
+    rm "$CONTEXT_DIR"
+  elif [[ -d "$CONTEXT_DIR" ]]; then
+    echo "[ai-mode] warning: ${CONTEXT_DIR} is a directory, backing up to ${CONTEXT_DIR}.bak"
+    mv "$CONTEXT_DIR" "${CONTEXT_DIR}.bak"
+  fi
+  
+  # Create symlink
+  ln -s "$mode_dir" "$CONTEXT_DIR"
+  
+  # Update shell env
+  export AI_MODE="$mode"
+  
+  # Rebuild context for all tools
+  local build_script="${AI_HOME}/bin/build-context"
+  if [[ -x "$build_script" ]]; then
+    "$build_script" 2>/dev/null || true
+  fi
+  
+  # Redistribute MCP servers
+  local mcp_script
+  mcp_script="$(dirname "${BASH_SOURCE[0]}")/ai-mcp"
+  if [[ -x "$mcp_script" ]]; then
+    "$mcp_script" distribute all 2>/dev/null || true
+  fi
+  
+  # Log to Obsidian (if available)
+  if obs_vault_set || obs_cli_available; then
+    local log_entry="- [$(date '+%Y-%m-%d %H:%M')] Mode switch: ${mode}"
+    obs_write_note "$(obs_session_note)" "$log_entry" 2>/dev/null || true
+  fi
+  
+  echo "[ai-mode] Switched to: ${mode}"
+  echo "  Context: ${CONTEXT_DIR} -> ${mode_dir}"
+}
+
 show_status() {
   echo "ai-dev status"
   echo "─────────────────────────────────────"
@@ -35,6 +87,19 @@ show_status() {
     transport="filesystem"
   fi
   echo "  Transport: ${transport}"
+  echo ""
+
+  # Show context symlink status
+  local ctx_dir="${AI_HOME:-$HOME/.ai}/context"
+  if [[ -L "$ctx_dir" ]]; then
+    local target
+    target=$(readlink "$ctx_dir")
+    echo "  Context:   ${ctx_dir} -> ${target}"
+  elif [[ -d "$ctx_dir" ]]; then
+    echo "  Context:   ${ctx_dir} (directory, not symlinked)"
+  else
+    echo "  Context:   ${ctx_dir} (not found)"
+  fi
   echo ""
 
   # Show current project/topic status
@@ -112,14 +177,19 @@ init_vault() {
 
 case "${1:-}" in
   work)
-    export AI_MODE="work"
-    echo "Switched to Work mode"
-    echo "Active path: Work/Projects/${OBS_PROJECT}"
+    switch_mode "work"
     ;;
   self)
-    export AI_MODE="self"
-    echo "Switched to Self mode"
-    echo "Active path: Self/Topics/${OBS_PROJECT}"
+    switch_mode "self"
+    ;;
+  --init-modes)
+    echo "Creating mode directories..."
+    mkdir -p "${MODES_DIR}/work/rules"
+    mkdir -p "${MODES_DIR}/self/rules"
+    echo "Created: ${MODES_DIR}/work/"
+    echo "Created: ${MODES_DIR}/self/"
+    echo ""
+    echo "Next: Add identity.md and tools.md to each mode directory"
     ;;
   -i|--init)
     init_vault
@@ -131,12 +201,13 @@ case "${1:-}" in
     show_status
     ;;
   -h|--help)
-    echo "Usage: ai-mode [work|self|--init|--list]"
-    echo "  (no args)  show current status"
-    echo "  work       switch to work mode"
-    echo "  self       switch to self mode"
-    echo "  --init     create vault directories"
-    echo "  --list     list all projects and topics"
+    echo "Usage: ai-mode [work|self|--init|--init-modes|--list]"
+    echo "  (no args)     show current status"
+    echo "  work          switch to work mode (symlinks context)"
+    echo "  self          switch to self mode (symlinks context)"
+    echo "  --init        create vault directories"
+    echo "  --init-modes  create mode directories in ~/.ai/modes/"
+    echo "  --list        list all projects and topics"
     ;;
   *)
     echo "Unknown mode: $1 (use 'work' or 'self')" >&2
