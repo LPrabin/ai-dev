@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# ai-handoff — prepare context for agent switch
+#
+# Usage:
+#   ai-handoff              # log context, show summary
+#   ai-handoff codex        # log context, show Codex pickup instructions
+#   ai-handoff claude       # log context, show Claude pickup instructions
+#   ai-handoff opencode     # log context, show OpenCode pickup instructions
+#   ai-handoff --resume     # show context from last handoff
+#
+# Logs current state to Obsidian context.md for continuity
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=obs-lib
+source "${SCRIPT_DIR}/obs-lib"
+
+show_resume() {
+  local context
+  context=$(obs_read_note "$(obs_context_file)" 2>/dev/null || echo "")
+  if [[ -n "$context" ]]; then
+    echo "=== Last Handoff Context ==="
+    echo ""
+    echo "$context"
+  else
+    echo "(No handoff context found)"
+  fi
+}
+
+write_handoff_context() {
+  local from_agent="${AI_AGENT:-unknown}"
+  local project="${OBS_PROJECT}"
+  
+  # Get recent session info
+  local session_tasks=""
+  session_tasks=$(obs_read_note "$(obs_session_note)" 2>/dev/null | grep -E "^\s*- \[" | head -10 || echo "")
+  
+  # Get recent decisions
+  local recent_decisions=""
+  recent_decisions=$(obs_read_note "$(obs_decisions_dir)/log.md" 2>/dev/null | tail -5 || echo "")
+  
+  # Get git status summary
+  local git_status=""
+  if git rev-parse --git-dir &>/dev/null; then
+    local branch
+    branch=$(git branch --show-current 2>/dev/null || echo "unknown")
+    local dirty=""
+    git diff --quiet 2>/dev/null || dirty=" (uncommitted changes)"
+    git_status="Branch: ${branch}${dirty}"
+  fi
+  
+  local content="# Handoff Context
+
+**From:** ${from_agent}
+**To:** (next agent)
+**Project:** ${project}
+**Mode:** ${OBS_MODE}
+**Time:** $(date '+%Y-%m-%d %H:%M')
+
+## Git Status
+${git_status:-Not in a git repo}
+
+## Current Tasks
+${session_tasks:-(no tasks)}
+
+## Recent Decisions
+${recent_decisions:-(none)}
+
+## What Was Being Worked On
+<!-- Fill in before handing off -->
+
+
+## What Needs to Happen Next
+<!-- Fill in before handing off -->
+
+
+## Blockers or Concerns
+<!-- Fill in if any -->
+
+"
+  
+  obs_overwrite_note "$(obs_context_file)" "$content"
+  echo "[ai-handoff] Context saved to: $(obs_context_file)"
+}
+
+show_pickup_instructions() {
+  local agent="$1"
+  
+  echo ""
+  echo "=== Pickup Instructions for ${agent} ==="
+  echo ""
+  
+  case "$agent" in
+    codex)
+      echo "In Codex, run:"
+      echo '  obs-read --all'
+      echo ""
+      echo "Or start with:"
+      echo '  "Read AGENTS.md and run obs-read to get context from the previous session."'
+      ;;
+    claude|claude-code)
+      echo "In Claude Code, the CLAUDE.md file will be read automatically."
+      echo ""
+      echo "Start with:"
+      echo '  "Run obs-read --all to get context from the previous session."'
+      ;;
+    opencode)
+      echo "In OpenCode, run:"
+      echo '  obs-read --all'
+      echo ""
+      echo "Or start with:"
+      echo '  "Read AGENTS.md and run obs-read to get context from the previous session."'
+      ;;
+    *)
+      echo "Run: obs-read --all"
+      echo "This will show the current project context and session state."
+      ;;
+  esac
+  
+  echo ""
+  echo "Context file: $(obs_context_file)"
+}
+
+log_handoff_to_changelog() {
+  local to_agent="${1:-unknown}"
+  local entry="- [$(date '+%Y-%m-%d %H:%M')] Handoff: ${AI_AGENT:-unknown} → ${to_agent}"
+  obs_write_note "$(obs_changelog_note)" "$entry" 2>/dev/null || true
+}
+
+case "${1:-}" in
+  --resume|-r)
+    show_resume
+    ;;
+  --help|-h)
+    echo "Usage: ai-handoff [agent | --resume]"
+    echo "  (no args)   save context and show summary"
+    echo "  codex       save context, show Codex pickup instructions"
+    echo "  claude      save context, show Claude pickup instructions"
+    echo "  opencode    save context, show OpenCode pickup instructions"
+    echo "  --resume    show context from last handoff"
+    ;;
+  "")
+    write_handoff_context
+    echo ""
+    echo "Edit the context file to add what you were working on and what's next."
+    echo "Then tell the next agent to run: obs-read --all"
+    ;;
+  codex|claude|claude-code|opencode)
+    write_handoff_context
+    log_handoff_to_changelog "$1"
+    show_pickup_instructions "$1"
+    ;;
+  *)
+    echo "[ai-handoff] unknown agent: $1" >&2
+    echo "Known agents: codex, claude, opencode" >&2
+    exit 1
+    ;;
+esac
