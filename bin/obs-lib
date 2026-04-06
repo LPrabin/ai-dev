@@ -78,6 +78,122 @@ obs_skills_dir()     { echo "$(obs_base_path)/Skills"; }
 obs_errors_dir()     { echo "$(obs_base_path)/Errors"; }
 obs_session_file()   { echo "$(obs_sessions_dir)/${OBS_DATE}.md"; }
 
+# ── new path helpers for enhanced logging ───────────────────────────────────
+
+obs_changelog_note()  { echo "$(obs_base_path)/changelog.md"; }
+obs_commits_note()    { echo "$(obs_base_path)/commits.md"; }
+obs_context_file()    { echo "$(obs_base_path)/context.md"; }
+obs_progress_note()   { echo "$(obs_base_path)/progress.md"; }
+
+obs_next_decision_number() {
+  local decisions_dir
+  decisions_dir=$(obs_decisions_dir)
+  if obs_vault_set && [[ -d "${OBS_VAULT}/${decisions_dir}" ]]; then
+    local max=0
+    for f in "${OBS_VAULT}/${decisions_dir}/"*.md; do
+      [[ -f "$f" ]] || continue
+      local num
+      num=$(basename "$f" | grep -oE '^[0-9]+' || echo 0)
+      [[ "$num" -gt "$max" ]] && max="$num"
+    done
+    printf "%03d" $((max + 1))
+  else
+    echo "001"
+  fi
+}
+
+# ── changelog write helper ──────────────────────────────────────────────────
+
+obs_log_changelog() {
+  local session_title="$1"
+  local accomplished="$2"
+  local decisions="$3"
+  local open_items="$4"
+  local agent="${5:-unknown}"
+  local duration="${6:-}"
+  
+  local entry="## $(date '+%Y-%m-%d %H:%M') — Session: ${session_title}
+Agent: ${agent} | Mode: ${OBS_MODE}${duration:+ | Duration: ${duration}}
+
+### Accomplished
+${accomplished}
+
+### Decisions made
+${decisions}
+
+### Open items
+${open_items}
+
+---
+"
+  obs_write_note "$(obs_changelog_note)" "$entry"
+}
+
+# ── commit log helper ───────────────────────────────────────────────────────
+
+obs_log_commit() {
+  local hash="$1"
+  local message="$2"
+  local files_changed="$3"
+  local time
+  time=$(date '+%H:%M')
+  local date
+  date=$(date '+%Y-%m-%d')
+  
+  # Check if we need to add date header
+  local changelog
+  changelog=$(obs_read_note "$(obs_commits_note)")
+  if ! echo "$changelog" | grep -q "^## ${date}$"; then
+    obs_write_note "$(obs_commits_note)" "
+## ${date}
+
+| Time | Hash | Message | Files |
+|------|------|---------|-------|"
+  fi
+  
+  local entry="| ${time} | \`${hash:0:7}\` | ${message} | ${files_changed} |"
+  obs_write_note "$(obs_commits_note)" "$entry"
+}
+
+# ── decision create helper ──────────────────────────────────────────────────
+
+obs_create_decision() {
+  local title="$1"
+  local context="$2"
+  local decision="$3"
+  local alternatives="$4"
+  local consequences="$5"
+  local agent="${6:-unknown}"
+  
+  local num
+  num=$(obs_next_decision_number)
+  local slug
+  slug=$(echo "$title" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g')
+  local filename="${num}-${slug}.md"
+  local filepath="$(obs_decisions_dir)/${filename}"
+  
+  local content="# ${num}: ${title}
+
+**Date:** $(date '+%Y-%m-%d')
+**Status:** Accepted
+**Agent:** ${agent}
+
+## Context
+${context}
+
+## Decision
+${decision}
+
+## Alternatives Rejected
+${alternatives}
+
+## Consequences
+${consequences}
+"
+  obs_overwrite_note "$filepath" "$content"
+  echo "$filepath"
+}
+
 # ── read ────────────────────────────────────────────────────────────────────
 
 obs_read_note() {
