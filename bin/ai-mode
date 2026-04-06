@@ -104,13 +104,13 @@ show_status() {
   fi
   echo ""
 
-  # Show current project/topic status
-  if obs_vault_set || obs_cli_available; then
-    local ctx
-    ctx=$(obs_read_note "$(obs_session_note)")
-    if [[ -n "$ctx" ]]; then
+  # Show current project/topic status (filesystem only for speed)
+  if obs_vault_set; then
+    local session_file
+    session_file="${OBS_VAULT}/$(obs_session_note)"
+    if [[ -f "$session_file" ]]; then
       echo "  Session tasks:"
-      echo "$ctx" | grep -E "^\s*- \[" | head -5 | sed 's/^/    /'
+      grep -E "^\s*- \[" "$session_file" 2>/dev/null | head -5 | sed 's/^/    /' || echo "    (none)"
     else
       echo "  (no active session — run: obs-write --init)"
     fi

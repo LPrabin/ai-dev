@@ -205,8 +205,11 @@ obs_read_note() {
       cat "$fspath"
       return
     fi
+    # File doesn't exist in filesystem — return empty rather than slow CLI call
+    echo ""
+    return
   fi
-  # Fall back to CLI
+  # Fall back to CLI only if no vault path is set
   if obs_cli_available; then
     obsidian read $(_obs_vault_arg) path="${note}" 2>/dev/null || echo ""
   else
