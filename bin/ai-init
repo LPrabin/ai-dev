@@ -297,17 +297,171 @@ dist/
   echo "    3. obs-write --decision  — log decisions as you go"
 }
 
+# ── multi-repo scaffold ──────────────────────────────────────────────────────
+scaffold_multi_repo() {
+  local project_name="$1"
+  local project_dir="$PWD"
+  local date_str
+  date_str=$(date +%Y-%m-%d)
+  
+  echo ""
+  echo "Scaffolding multi-repo workspace: ${project_name}"
+  echo "Directory: ${project_dir}"
+  echo "Mode: ${OBS_MODE}"
+  echo ""
+  
+  # ── docs/ repo structure ────────────────────────────────────────────────────
+  mkdir -p docs/workspace/{commands,agents}
+  mkdir -p docs/progress
+  mkdir -p docs/tests/e2e
+  
+  # Create AGENTS.md in docs/workspace
+  cat > docs/workspace/AGENTS.md <<EOF
+# ${project_name} — Multi-Repo Workspace
+
+## Overview
+This is a multi-repo workspace. The project root is NOT a git repo.
+
+## Repositories
+<!-- List your repos here -->
+- \`repo-1/\` — Description
+- \`repo-2/\` — Description
+- \`docs/\` — Workspace config, E2E tests, progress tracking
+
+## Workflow
+1. Run Claude/Codex/OpenCode from project root
+2. AGENTS.md (this file) provides workspace-wide context
+3. Each repo has its own tests; E2E tests live in \`docs/tests/e2e/\`
+
+## Progress
+See \`docs/progress/progress.md\` for current phase status.
+
+## Commands
+Custom slash commands in \`.claude/commands/\` (symlinked from \`docs/workspace/commands/\`)
+
+## Conventions
+- Commit messages: conventional commits format
+- Branch naming: \`feature/\`, \`fix/\`, \`chore/\`
+
+## Obsidian
+\`$(obs_base_path)\` — run \`ai-start\` at session start.
+EOF
+  success "created docs/workspace/AGENTS.md"
+  
+  # Create progress.md
+  cat > docs/progress/progress.md <<EOF
+# Progress: ${project_name}
+
+## Phase 1: Setup
+- [ ] Initialize repositories
+- [ ] Set up CI/CD
+- [ ] Configure workspace
+
+## Phase 2: Core Features
+- [ ] Feature 1
+- [ ] Feature 2
+
+## Phase 3: Testing
+- [ ] Unit tests
+- [ ] Integration tests
+- [ ] E2E tests
+EOF
+  success "created docs/progress/progress.md"
+  
+  # ── Symlinks at root ────────────────────────────────────────────────────────
+  if [[ ! -L "AGENTS.md" ]] && [[ ! -f "AGENTS.md" ]]; then
+    ln -s docs/workspace/AGENTS.md AGENTS.md
+    success "created AGENTS.md -> docs/workspace/AGENTS.md"
+  else
+    skip "AGENTS.md already exists"
+  fi
+  
+  # Claude Code symlinks
+  if command -v claude &>/dev/null; then
+    mkdir -p .claude
+    if [[ ! -L ".claude/commands" ]] && [[ ! -d ".claude/commands" ]]; then
+      ln -s ../docs/workspace/commands .claude/commands
+      success "created .claude/commands -> docs/workspace/commands"
+    else
+      skip ".claude/commands already exists"
+    fi
+    
+    if [[ ! -L "CLAUDE.md" ]] && [[ ! -f "CLAUDE.md" ]]; then
+      ln -s AGENTS.md CLAUDE.md
+      success "created CLAUDE.md -> AGENTS.md"
+    fi
+  fi
+  
+  # ── Taskboard (work mode only) ──────────────────────────────────────────────
+  if [[ "$OBS_MODE" == "work" ]]; then
+    if [[ ! -d "taskboard" ]]; then
+      mkdir -p taskboard/.gitlab/issue_templates
+      cat > taskboard/README.md <<EOF
+# Taskboard
+
+This repo holds GitLab issues and milestones for ${project_name}.
+No code here — just issue tracking.
+
+## Usage
+\`\`\`bash
+# Create milestone
+glab milestone create --title "Phase 1" --repo taskboard
+
+# Create issue
+glab issue create --title "Task" --milestone "Phase 1" --repo taskboard
+
+# List issues
+glab issue list --milestone "Phase 1" --repo taskboard
+\`\`\`
+EOF
+      success "created taskboard/ scaffold"
+    else
+      skip "taskboard/ already exists"
+    fi
+  fi
+  
+  # ── Obsidian ────────────────────────────────────────────────────────────────
+  if obs_cli_available || obs_vault_set; then
+    info "creating Obsidian vault structure..."
+    AI_PROJECT="$project_name" obs_ensure_dirs
+    AI_PROJECT="$project_name" "${SCRIPT_DIR}/obs-write" --init 2>/dev/null \
+      && success "Obsidian structure created at $(obs_base_path)" \
+      || skip "Obsidian not available"
+  fi
+  
+  # ── Summary ─────────────────────────────────────────────────────────────────
+  echo ""
+  echo "Multi-repo workspace created: ${project_name}"
+  echo ""
+  echo "  Structure:"
+  echo "    AGENTS.md              -> docs/workspace/AGENTS.md"
+  echo "    .claude/commands/      -> docs/workspace/commands/"
+  echo "    docs/workspace/        — workspace configuration"
+  echo "    docs/progress/         — progress tracking"
+  echo "    docs/tests/e2e/        — E2E tests"
+  [[ "$OBS_MODE" == "work" ]] && echo "    taskboard/             — GitLab issues (work mode)"
+  echo ""
+  echo "  Next steps:"
+  echo "    1. Create/clone your repos in this directory"
+  echo "    2. Edit docs/workspace/AGENTS.md with repo descriptions"
+  echo "    3. ai-start to begin a session"
+}
+
 # ── entry point ──────────────────────────────────────────────────────────────
 case "${1:-}" in
   --global-install|-g)
     global_install
+    ;;
+  --multi-repo|-m)
+    shift
+    scaffold_multi_repo "${1:-$(basename "$PWD")}"
     ;;
   "")
     scaffold_project "$(basename "$PWD")"
     ;;
   --*)
     echo "Unknown flag: $1" >&2
-    echo "Usage: ai-init [project-name] | --global-install" >&2
+    echo "Usage: ai-init [project-name] | --multi-repo [name] | --global-install" >&2
     exit 1
     ;;
   *)
