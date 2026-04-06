@@ -1,69 +1,61 @@
-# Skill: TDD
+# Skill: Test-Driven Development
 
-## The cycle
-1. Red — write a failing test that describes desired behaviour.
-2. Green — minimum code to pass.
-3. Refactor — clean up, keep green.
+Based on [superpowers/test-driven-development](https://github.com/obra/superpowers).
 
-Never skip to green without a red test first.
+## Iron Law
 
-## Test anatomy (pytest)
-```python
-import pytest
-from decimal import Decimal
-from unittest.mock import MagicMock
-from src.services.payment_service import PaymentService
-from src.models.payment import PaymentRequest
+No production code without a failing test first.
+Code written before test → delete it and start over.
 
-@pytest.fixture
-def mock_repo():
-    return MagicMock()
+## The Cycle
 
-@pytest.fixture
-def service(mock_repo):
-    return PaymentService(repo=mock_repo)
+### 1. RED — Write ONE failing test
+- Smallest possible test for the next behaviour.
+- Run it. **Watch it fail.** If it passes, you misunderstand the code — investigate.
+- The failure message must clearly describe what's missing.
 
-class TestProcessPayment:
-    def test_returns_existing_on_duplicate_key(self, service, mock_repo):
-        existing = {"id": "pay_123", "status": "completed"}
-        mock_repo.find_by_key.return_value = existing
-        request = PaymentRequest(
-            amount=Decimal("10.00"), currency="USD", idempotency_key="key-abc"
-        )
-        result = service.process(request)
-        assert result == existing
-        mock_repo.create.assert_not_called()
-```
+### 2. GREEN — Minimum code to pass
+- Write the simplest implementation that makes the test green.
+- No extra features. No "while I'm here" improvements.
+- Run tests. **All must pass.** If others break, fix before continuing.
 
-## conftest.py pattern
-```python
-import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session
+### 3. REFACTOR — Clean up, stay green
+- Extract duplication, improve names, simplify.
+- Do NOT add behaviour during refactor.
+- Run tests after every change. Stay green.
 
-@pytest.fixture(scope="session")
-def db_engine():
-    engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    yield engine
-    engine.dispose()
+## Mandatory Verification
 
-@pytest.fixture
-def db_session(db_engine):
-    with Session(db_engine) as session:
-        yield session
-        session.rollback()
-```
+Each phase MUST include running tests and confirming the expected state:
+- RED: test fails with expected message
+- GREEN: all tests pass
+- REFACTOR: all tests pass, no behaviour change
 
-## What to test
-- Always: happy path, error path, edge cases (None, empty, 0, max).
-- Always: anything touching external systems — mock the boundary.
-- Skip: framework code, generated code, trivial getters.
+Skip verification → restart the cycle from RED.
 
-## Run commands
+## Common Rationalizations (all wrong)
+
+| Excuse | Reality |
+|---|---|
+| "Too simple to test" | Simple code still breaks. Test it. |
+| "I'll write tests after" | You won't. And you'll write worse tests. |
+| "The test would just duplicate the code" | Then you're testing implementation, not behaviour. |
+| "I need to see the shape first" | Spike in a branch, throw it away, TDD the real thing. |
+| "It's just a refactor" | Run existing tests. If none cover it, add one first. |
+
+## Red Flags
+
+- Writing multiple tests before any implementation
+- Implementation that passes tests "by accident"
+- Refactoring that changes test expectations
+- Skipping the RED verification step
+- Test file growing much faster than implementation
+
+## Run Commands
+
 ```bash
 uv run pytest -xvs                              # fail fast, verbose
-uv run pytest --tb=short -q                    # CI mode
-uv run pytest -k "test_payment"                # filter
-uv run pytest --cov=src --cov-report=term-missing
+uv run pytest --tb=short -q                      # CI mode
+uv run pytest -k "test_payment"                  # filter
+uv run pytest --cov=src --cov-report=term-missing # coverage
 ```

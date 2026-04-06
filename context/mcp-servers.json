@@ -1,0 +1,35 @@
+{
+  "_comment": "Unified MCP server registry. Single source of truth for all AI tools.",
+  "_usage": "Adapters read this file and write tool-specific MCP configs.",
+
+  "servers": {
+    "serena": {
+      "description": "Semantic code navigation — symbol-level editing, refactoring, references",
+      "command": "uvx",
+      "args": ["-p", "3.13", "--from", "git+https://github.com/oraios/serena", "serena", "start-mcp-server"],
+      "env": {},
+      "enabled": true,
+      "tags": ["code-intelligence", "refactoring"]
+    },
+
+    "context7": {
+      "description": "Live library documentation injected into prompts",
+      "url": "https://mcp.context7.com/mcp",
+      "headers": {
+        "x-context7-api-key": "${CONTEXT7_API_KEY}"
+      },
+      "enabled": false,
+      "tags": ["documentation", "library-docs"],
+      "_note": "Set CONTEXT7_API_KEY env var and flip enabled:true to activate"
+    },
+
+    "playwright": {
+      "description": "Browser automation via accessibility snapshots — testing, scraping, interaction",
+      "command": "npx",
+      "args": ["@playwright/mcp@latest"],
+      "env": {},
+      "enabled": true,
+      "tags": ["browser", "testing", "automation"]
+    }
+  }
+}

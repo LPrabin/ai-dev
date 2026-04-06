@@ -92,3 +92,31 @@ EOF
 done
 
 echo "[adapter-claude-code] wrote command stubs to: ${CLAUDE_DIR}/commands/"
+
+# Distribute MCP servers via `claude mcp add-json` CLI
+MCP_REGISTRY="${AI_HOME:-$HOME/.ai}/context/mcp-servers.json"
+if [[ -f "$MCP_REGISTRY" ]] && command -v jq >/dev/null 2>&1 && command -v claude >/dev/null 2>&1; then
+  MCP_COUNT=0
+
+  for name in $(jq -r '.servers | to_entries[] | select(.value.enabled) | .key' "$MCP_REGISTRY"); do
+    claude mcp remove "$name" >/dev/null 2>&1 || true
+
+    has_url=$(jq -r --arg n "$name" '.servers[$n].url // empty' "$MCP_REGISTRY")
+    if [[ -n "$has_url" ]]; then
+      server_json=$(jq -c --arg n "$name" '{
+        type: "http", url: .servers[$n].url
+      } + (if (.servers[$n].headers // {} | length) > 0
+           then { headers: .servers[$n].headers } else {} end)' "$MCP_REGISTRY")
+    else
+      server_json=$(jq -c --arg n "$name" '{
+        type: "stdio", command: .servers[$n].command, args: (.servers[$n].args // [])
+      } + (if (.servers[$n].env // {} | length) > 0
+           then { env: .servers[$n].env } else {} end)' "$MCP_REGISTRY")
+    fi
+
+    claude mcp add-json "$name" "$server_json" >/dev/null 2>&1
+    MCP_COUNT=$((MCP_COUNT + 1))
+  done
+
+  echo "[adapter-claude-code] added ${MCP_COUNT} MCP server(s) via claude mcp add-json"
+fi
