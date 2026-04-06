@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# build-context — assemble ~/.ai/context/ + Obsidian into a single prompt file
+# build-context — assemble agent config from Obsidian into tool-specific files
 #
-# This is the bridge between source-of-truth markdown files and
-# tool-specific config files. Single vault, CLI-first.
+# Source of truth: Obsidian vault at $OBS_VAULT/Library/AgentConfig/{mode}/
+# Output: ~/.ai/prompts/global.md → adapters → tool configs
 #
 # Usage:
 #   build-context                  write to ~/.ai/prompts/global.md (default)
@@ -12,20 +12,12 @@
 #   build-context --adapter TOOL   run adapter (claude-code | codex | opencode | all)
 #   build-context --mcp            also distribute MCP servers from registry
 #
-# Run this after editing ~/.ai/context/. Run with --obsidian to pull from Obsidian.
+# Edit agent config in Obsidian: Library/AgentConfig/{work,self}/
+# Then run: build-context --adapter all
 
 set -euo pipefail
 
 AI_HOME="${AI_HOME:-$HOME/.ai}"
-CONTEXT_DIR="${AI_HOME}/context"
-
-# Resolve symlink if context is pointing to a mode directory
-if [[ -L "$CONTEXT_DIR" ]]; then
-  CONTEXT_DIR_RESOLVED=$(readlink -f "$CONTEXT_DIR" 2>/dev/null || greadlink -f "$CONTEXT_DIR" 2>/dev/null || echo "$CONTEXT_DIR")
-  echo "[build-context] Using mode context: ${CONTEXT_DIR_RESOLVED}"
-  CONTEXT_DIR="$CONTEXT_DIR_RESOLVED"
-fi
-
 PROMPT_DIR="${AI_HOME}/prompts"
 OUTPUT_FILE="${PROMPT_DIR}/global.md"
 STDOUT_MODE=false
@@ -36,6 +28,55 @@ DISTRIBUTE_MCP=false
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=obs-lib
 source "${SCRIPT_DIR}/obs-lib"
+
+# Determine context directory: Obsidian vault (preferred) or local fallback
+get_context_dir() {
+  if obs_vault_set; then
+    local vault_config="${OBS_VAULT}/Library/AgentConfig/${OBS_MODE}"
+    if [[ -d "$vault_config" ]]; then
+      echo "$vault_config"
+      return
+    fi
+  fi
+  
+  # Fallback to local ~/.ai/context or ~/.ai/modes/{mode}
+  local local_ctx="${AI_HOME}/context"
+  if [[ -L "$local_ctx" ]]; then
+    readlink -f "$local_ctx" 2>/dev/null || greadlink -f "$local_ctx" 2>/dev/null || echo "$local_ctx"
+  elif [[ -d "$local_ctx" ]]; then
+    echo "$local_ctx"
+  else
+    echo "${AI_HOME}/modes/${OBS_MODE}"
+  fi
+}
+
+# Get skills directory (shared across modes)
+get_skills_dir() {
+  if obs_vault_set; then
+    local vault_skills="${OBS_VAULT}/Library/Skills"
+    if [[ -d "$vault_skills" ]]; then
+      echo "$vault_skills"
+      return
+    fi
+  fi
+  echo "${AI_HOME}/context/skills"
+}
+
+# Get agents directory (shared across modes)
+get_agents_dir() {
+  if obs_vault_set; then
+    local vault_agents="${OBS_VAULT}/Library/Agents"
+    if [[ -d "$vault_agents" ]]; then
+      echo "$vault_agents"
+      return
+    fi
+  fi
+  echo "${AI_HOME}/context/agents"
+}
+
+CONTEXT_DIR=$(get_context_dir)
+SKILLS_DIR=$(get_skills_dir)
+AGENTS_DIR=$(get_agents_dir)
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -94,12 +135,13 @@ assemble() {
   echo "# AI Dev — Global Context"
   echo "# Generated: $(date +%Y-%m-%d\ %H:%M)"
   echo "# Source: ${CONTEXT_DIR}"
+  echo "# Mode: ${OBS_MODE}"
   if [[ "$INCLUDE_OBSIDIAN" == true ]]; then
-    echo "# Obsidian: ${OBS_MODE} mode, vault: ${OBS_VAULT:-<not set>}"
+    echo "# Obsidian project: ${OBS_PROJECT}"
   fi
   echo ""
 
-  # Identity always first
+  # Identity always first (mode-specific)
   if [[ -f "${CONTEXT_DIR}/identity.md" ]]; then
     cat "${CONTEXT_DIR}/identity.md"
     echo ""
@@ -107,7 +149,15 @@ assemble() {
     echo ""
   fi
 
-  # Rules
+  # Tools (mode-specific: glab vs gh, etc.)
+  if [[ -f "${CONTEXT_DIR}/tools.md" ]]; then
+    cat "${CONTEXT_DIR}/tools.md"
+    echo ""
+    echo "---"
+    echo ""
+  fi
+
+  # Rules (mode-specific)
   for f in "${CONTEXT_DIR}/rules/"*.md; do
     [[ -f "$f" ]] || continue
     cat "$f"
@@ -116,11 +166,11 @@ assemble() {
     echo ""
   done
 
-  # Skills
+  # Skills (shared across modes)
   echo "# Skills available"
   echo ""
-  echo "Detailed skill files in ~/.ai/context/skills/. Reference them when relevant:"
-  for f in "${CONTEXT_DIR}/skills/"*.md; do
+  echo "Detailed skill files in Obsidian Library/Skills/. Reference them when relevant:"
+  for f in "${SKILLS_DIR}/"*.md; do
     [[ -f "$f" ]] || continue
     name=$(basename "$f" .md)
     first_line=$(grep -m1 "^# " "$f" | sed 's/^# //')
@@ -130,17 +180,17 @@ assemble() {
   echo "---"
   echo ""
 
-  # Agents
+  # Agents (shared across modes)
   echo "# Agents"
   echo ""
-  for f in "${CONTEXT_DIR}/agents/"*.md; do
+  for f in "${AGENTS_DIR}/"*.md; do
     [[ -f "$f" ]] || continue
     cat "$f"
     echo ""
   done
 
-  # MCP servers available
-  local mcp_registry="${CONTEXT_DIR}/mcp-servers.json"
+  # MCP servers available (from ~/.ai/context/ - not in Obsidian)
+  local mcp_registry="${AI_HOME}/context/mcp-servers.json"
   if [[ -f "$mcp_registry" ]] && command -v jq >/dev/null 2>&1; then
     local enabled_count
     enabled_count=$(jq '[.servers | to_entries[] | select(.value.enabled)] | length' "$mcp_registry")

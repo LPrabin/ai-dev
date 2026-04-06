@@ -1,0 +1,218 @@
+#!/usr/bin/env bash
+# ai-sync — sync agent config between ~/.ai/ and Obsidian vault
+#
+# Usage:
+#   ai-sync --init           # initialize Obsidian structure from ~/.ai/
+#   ai-sync --to-obsidian    # copy current config to Obsidian (overwrites)
+#   ai-sync --from-obsidian  # copy from Obsidian to ~/.ai/ (overwrites)
+#   ai-sync --status         # show sync status
+#
+# Obsidian structure:
+#   Library/AgentConfig/work/   — work mode config (identity.md, tools.md, rules/)
+#   Library/AgentConfig/self/   — self mode config
+#   Library/Skills/             — shared skills (python.md, tdd.md, etc.)
+#   Library/Agents/             — shared agents (planner.md, reviewer.md)
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=obs-lib
+source "${SCRIPT_DIR}/obs-lib"
+
+AI_HOME="${AI_HOME:-$HOME/.ai}"
+
+obs_require_vault
+
+VAULT_CONFIG="${OBS_VAULT}/Library/AgentConfig"
+VAULT_SKILLS="${OBS_VAULT}/Library/Skills"
+VAULT_AGENTS="${OBS_VAULT}/Library/Agents"
+
+LOCAL_MODES="${AI_HOME}/modes"
+LOCAL_CONTEXT="${AI_HOME}/context"
+
+show_status() {
+  echo "=== Sync Status ==="
+  echo ""
+  echo "Obsidian vault: ${OBS_VAULT}"
+  echo "Local config:   ${AI_HOME}"
+  echo ""
+  
+  echo "Obsidian structure:"
+  if [[ -d "$VAULT_CONFIG" ]]; then
+    echo "  ✓ Library/AgentConfig/"
+    [[ -d "${VAULT_CONFIG}/work" ]] && echo "    ✓ work/" || echo "    ✗ work/ (missing)"
+    [[ -d "${VAULT_CONFIG}/self" ]] && echo "    ✓ self/" || echo "    ✗ self/ (missing)"
+  else
+    echo "  ✗ Library/AgentConfig/ (missing)"
+  fi
+  
+  [[ -d "$VAULT_SKILLS" ]] && echo "  ✓ Library/Skills/" || echo "  ✗ Library/Skills/ (missing)"
+  [[ -d "$VAULT_AGENTS" ]] && echo "  ✓ Library/Agents/" || echo "  ✗ Library/Agents/ (missing)"
+  echo ""
+  
+  echo "Local structure:"
+  [[ -d "$LOCAL_MODES" ]] && echo "  ✓ ~/.ai/modes/" || echo "  ✗ ~/.ai/modes/ (missing)"
+  [[ -d "$LOCAL_CONTEXT" ]] && echo "  ✓ ~/.ai/context/" || echo "  ✗ ~/.ai/context/ (missing)"
+  echo ""
+  
+  echo "Current mode: ${OBS_MODE}"
+  echo ""
+  
+  # Show which source will be used
+  if [[ -d "${VAULT_CONFIG}/${OBS_MODE}" ]]; then
+    echo "build-context will read from: Obsidian (${VAULT_CONFIG}/${OBS_MODE})"
+  elif [[ -d "${LOCAL_MODES}/${OBS_MODE}" ]]; then
+    echo "build-context will read from: Local (~/.ai/modes/${OBS_MODE})"
+  else
+    echo "build-context will read from: Local (~/.ai/context)"
+  fi
+}
+
+init_obsidian() {
+  echo "Initializing Obsidian agent config structure..."
+  echo ""
+  
+  # Create directories
+  mkdir -p "${VAULT_CONFIG}/work/rules"
+  mkdir -p "${VAULT_CONFIG}/self/rules"
+  mkdir -p "${VAULT_SKILLS}"
+  mkdir -p "${VAULT_AGENTS}"
+  
+  echo "Created directories:"
+  echo "  ${VAULT_CONFIG}/work/"
+  echo "  ${VAULT_CONFIG}/self/"
+  echo "  ${VAULT_SKILLS}/"
+  echo "  ${VAULT_AGENTS}/"
+  echo ""
+  
+  # Copy from local modes if they exist
+  if [[ -d "${LOCAL_MODES}/work" ]]; then
+    cp -r "${LOCAL_MODES}/work/"* "${VAULT_CONFIG}/work/" 2>/dev/null || true
+    echo "Copied: ~/.ai/modes/work/ → Library/AgentConfig/work/"
+  fi
+  
+  if [[ -d "${LOCAL_MODES}/self" ]]; then
+    cp -r "${LOCAL_MODES}/self/"* "${VAULT_CONFIG}/self/" 2>/dev/null || true
+    echo "Copied: ~/.ai/modes/self/ → Library/AgentConfig/self/"
+  fi
+  
+  # Copy skills from local context
+  if [[ -d "${LOCAL_CONTEXT}/skills" ]]; then
+    cp -r "${LOCAL_CONTEXT}/skills/"* "${VAULT_SKILLS}/" 2>/dev/null || true
+    echo "Copied: ~/.ai/context/skills/ → Library/Skills/"
+  fi
+  
+  # Copy agents from local context
+  if [[ -d "${LOCAL_CONTEXT}/agents" ]]; then
+    cp -r "${LOCAL_CONTEXT}/agents/"* "${VAULT_AGENTS}/" 2>/dev/null || true
+    echo "Copied: ~/.ai/context/agents/ → Library/Agents/"
+  fi
+  
+  echo ""
+  echo "Done. Edit your agent config in Obsidian:"
+  echo "  Library/AgentConfig/work/identity.md"
+  echo "  Library/AgentConfig/work/tools.md"
+  echo "  Library/AgentConfig/work/rules/"
+  echo "  Library/Skills/*.md"
+  echo "  Library/Agents/*.md"
+  echo ""
+  echo "Then run: build-context --adapter all"
+}
+
+sync_to_obsidian() {
+  echo "Syncing local config to Obsidian..."
+  
+  # Ensure directories exist
+  mkdir -p "${VAULT_CONFIG}/work/rules"
+  mkdir -p "${VAULT_CONFIG}/self/rules"
+  mkdir -p "${VAULT_SKILLS}"
+  mkdir -p "${VAULT_AGENTS}"
+  
+  # Copy modes
+  if [[ -d "${LOCAL_MODES}/work" ]]; then
+    cp -r "${LOCAL_MODES}/work/"* "${VAULT_CONFIG}/work/"
+    echo "  work mode → Obsidian"
+  fi
+  
+  if [[ -d "${LOCAL_MODES}/self" ]]; then
+    cp -r "${LOCAL_MODES}/self/"* "${VAULT_CONFIG}/self/"
+    echo "  self mode → Obsidian"
+  fi
+  
+  # Copy skills
+  if [[ -d "${LOCAL_CONTEXT}/skills" ]]; then
+    cp -r "${LOCAL_CONTEXT}/skills/"* "${VAULT_SKILLS}/"
+    echo "  skills → Obsidian"
+  fi
+  
+  # Copy agents
+  if [[ -d "${LOCAL_CONTEXT}/agents" ]]; then
+    cp -r "${LOCAL_CONTEXT}/agents/"* "${VAULT_AGENTS}/"
+    echo "  agents → Obsidian"
+  fi
+  
+  echo ""
+  echo "Done. Obsidian is now the source of truth."
+}
+
+sync_from_obsidian() {
+  echo "Syncing from Obsidian to local config..."
+  
+  # Ensure local directories exist
+  mkdir -p "${LOCAL_MODES}/work/rules"
+  mkdir -p "${LOCAL_MODES}/self/rules"
+  mkdir -p "${LOCAL_CONTEXT}/skills"
+  mkdir -p "${LOCAL_CONTEXT}/agents"
+  
+  # Copy modes
+  if [[ -d "${VAULT_CONFIG}/work" ]]; then
+    cp -r "${VAULT_CONFIG}/work/"* "${LOCAL_MODES}/work/"
+    echo "  Obsidian work → local"
+  fi
+  
+  if [[ -d "${VAULT_CONFIG}/self" ]]; then
+    cp -r "${VAULT_CONFIG}/self/"* "${LOCAL_MODES}/self/"
+    echo "  Obsidian self → local"
+  fi
+  
+  # Copy skills
+  if [[ -d "${VAULT_SKILLS}" ]]; then
+    cp -r "${VAULT_SKILLS}/"* "${LOCAL_CONTEXT}/skills/"
+    echo "  Obsidian skills → local"
+  fi
+  
+  # Copy agents
+  if [[ -d "${VAULT_AGENTS}" ]]; then
+    cp -r "${VAULT_AGENTS}/"* "${LOCAL_CONTEXT}/agents/"
+    echo "  Obsidian agents → local"
+  fi
+  
+  echo ""
+  echo "Done. Local config updated from Obsidian."
+}
+
+case "${1:-}" in
+  --init|-i)
+    init_obsidian
+    ;;
+  --to-obsidian)
+    sync_to_obsidian
+    ;;
+  --from-obsidian)
+    sync_from_obsidian
+    ;;
+  --status|-s|"")
+    show_status
+    ;;
+  --help|-h)
+    echo "Usage: ai-sync [--init | --to-obsidian | --from-obsidian | --status]"
+    echo "  --init           initialize Obsidian structure from ~/.ai/"
+    echo "  --to-obsidian    copy current config to Obsidian"
+    echo "  --from-obsidian  copy from Obsidian to ~/.ai/"
+    echo "  --status         show sync status (default)"
+    ;;
+  *)
+    echo "Unknown option: $1" >&2
+    exit 1
+    ;;
+esac
