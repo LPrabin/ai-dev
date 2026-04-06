@@ -156,15 +156,52 @@ $*
     exit 0
     ;;
 
+  --changelog)
+    shift
+    local title="${1:-Session}"
+    shift 2>/dev/null || true
+    
+    # Interactive changelog entry
+    local tmpfile
+    tmpfile=$(mktemp /tmp/obs-changelog-XXXXXX.md)
+    
+    cat > "$tmpfile" <<EOF
+# Session: ${title}
+
+## Accomplished
+- 
+
+## Decisions made
+- 
+
+## Open items
+- 
+EOF
+    
+    "${EDITOR:-vi}" "$tmpfile"
+    
+    local accomplished decisions open_items
+    accomplished=$(sed -n '/^## Accomplished/,/^## Decisions/p' "$tmpfile" | grep -v '^##' | sed '/^$/d')
+    decisions=$(sed -n '/^## Decisions/,/^## Open/p' "$tmpfile" | grep -v '^##' | sed '/^$/d')
+    open_items=$(sed -n '/^## Open items/,/^$/p' "$tmpfile" | grep -v '^##' | sed '/^$/d')
+    
+    rm -f "$tmpfile"
+    
+    obs_log_changelog "$title" "$accomplished" "$decisions" "$open_items" "${AI_AGENT:-cli}" ""
+    echo "Logged to: $(obs_changelog_note)"
+    exit 0
+    ;;
+
   -h|--help)
-    echo "Usage: obs-write [--init | --session TEXT | --decision TEXT | --fix TEXT | --skill TEXT | --link PATH]"
+    echo "Usage: obs-write [--init | --session TEXT | --decision TEXT | --fix TEXT | --skill TEXT | --link PATH | --changelog TITLE]"
     echo "  (no flag)     interactive session log"
     echo "  --init        create project/topic vault structure"
     echo "  --session     write to Session.md"
-    echo "  --decision    log a decision"
+    echo "  --decision    log a decision (simple)"
     echo "  --fix         log a bug fix"
     echo "  --skill       log a learned skill/pattern"
     echo "  --link        cross-link to another note (Obsidian [[wikilink]])"
+    echo "  --changelog   write structured changelog entry"
     exit 0
     ;;
 esac
