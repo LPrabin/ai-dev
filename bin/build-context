@@ -10,6 +10,7 @@
 #   build-context --out FILE       write to specific file
 #   build-context --obsidian       include current Obsidian project context
 #   build-context --adapter TOOL   run adapter (claude-code | codex | opencode | all)
+#   build-context --mcp            also distribute MCP servers from registry
 #
 # Run this after editing ~/.ai/context/. Run with --obsidian to pull from Obsidian.
 
@@ -17,11 +18,20 @@ set -euo pipefail
 
 AI_HOME="${AI_HOME:-$HOME/.ai}"
 CONTEXT_DIR="${AI_HOME}/context"
+
+# Resolve symlink if context is pointing to a mode directory
+if [[ -L "$CONTEXT_DIR" ]]; then
+  CONTEXT_DIR_RESOLVED=$(readlink -f "$CONTEXT_DIR" 2>/dev/null || greadlink -f "$CONTEXT_DIR" 2>/dev/null || echo "$CONTEXT_DIR")
+  echo "[build-context] Using mode context: ${CONTEXT_DIR_RESOLVED}"
+  CONTEXT_DIR="$CONTEXT_DIR_RESOLVED"
+fi
+
 PROMPT_DIR="${AI_HOME}/prompts"
 OUTPUT_FILE="${PROMPT_DIR}/global.md"
 STDOUT_MODE=false
 ADAPTER=""
 INCLUDE_OBSIDIAN=false
+DISTRIBUTE_MCP=false
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=obs-lib
@@ -33,6 +43,7 @@ while [[ $# -gt 0 ]]; do
     --out)        shift; OUTPUT_FILE="$1" ;;
     --adapter)    shift; ADAPTER="$1" ;;
     --obsidian)   INCLUDE_OBSIDIAN=true ;;
+    --mcp)        DISTRIBUTE_MCP=true ;;
     *) echo "Unknown arg: $1" >&2; exit 1 ;;
   esac
   shift
@@ -128,6 +139,24 @@ assemble() {
     echo ""
   done
 
+  # MCP servers available
+  local mcp_registry="${CONTEXT_DIR}/mcp-servers.json"
+  if [[ -f "$mcp_registry" ]] && command -v jq >/dev/null 2>&1; then
+    local enabled_count
+    enabled_count=$(jq '[.servers | to_entries[] | select(.value.enabled)] | length' "$mcp_registry")
+    if [[ "$enabled_count" -gt 0 ]]; then
+      echo "# MCP Servers"
+      echo ""
+      echo "The following MCP servers are available (managed via \`ai-mcp\`):"
+      jq -r '.servers | to_entries[] | select(.value.enabled) | "- **\(.key)**: \(.value.description)"' "$mcp_registry"
+      echo ""
+      echo "Registry: \`~/.ai/context/mcp-servers.json\`. Use \`ai-mcp list\` to see all."
+      echo ""
+      echo "---"
+      echo ""
+    fi
+  fi
+
   # Project context hook
   echo "---"
   echo ""
@@ -185,3 +214,15 @@ case "$ADAPTER" in
   all)        for t in claude-code codex opencode; do run_adapter "$t"; done ;;
   *)          run_adapter "$ADAPTER" ;;
 esac
+
+# MCP distribution (separate from adapters — adapters handle it inline,
+# but --mcp flag triggers standalone distribution via ai-mcp)
+if [[ "$DISTRIBUTE_MCP" == true ]]; then
+  AI_MCP="${AI_HOME}/bin/ai-mcp"
+  if [[ -x "$AI_MCP" ]]; then
+    echo "[build-context] distributing MCP servers..."
+    "$AI_MCP" distribute "${ADAPTER:-all}"
+  else
+    echo "[build-context] warning: ai-mcp not found, skipping MCP distribution" >&2
+  fi
+fi
