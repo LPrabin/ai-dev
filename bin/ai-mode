@@ -38,12 +38,15 @@ switch_mode() {
   if [[ -L "$CONTEXT_DIR" ]]; then
     rm "$CONTEXT_DIR"
   elif [[ -d "$CONTEXT_DIR" ]]; then
-    echo "[ai-mode] warning: ${CONTEXT_DIR} is a directory, backing up to ${CONTEXT_DIR}.bak"
-    mv "$CONTEXT_DIR" "${CONTEXT_DIR}.bak"
+    echo "[ai-mode] warning: ${CONTEXT_DIR} is a directory, backing up to ${CONTEXT_DIR}.bak.$(date +%s)"
+    mv "$CONTEXT_DIR" "${CONTEXT_DIR}.bak.$(date +%s)"
   fi
   
   # Create symlink
-  ln -s "$mode_dir" "$CONTEXT_DIR"
+  if ! ln -s "$mode_dir" "$CONTEXT_DIR"; then
+    echo "[ai-mode] error: failed to create symlink" >&2
+    return 1
+  fi
   
   # Update shell env
   export AI_MODE="$mode"
@@ -90,15 +93,14 @@ show_status() {
   echo ""
 
   # Show context symlink status
-  local ctx_dir="${AI_HOME:-$HOME/.ai}/context"
-  if [[ -L "$ctx_dir" ]]; then
+  if [[ -L "$CONTEXT_DIR" ]]; then
     local target
-    target=$(readlink "$ctx_dir")
-    echo "  Context:   ${ctx_dir} -> ${target}"
-  elif [[ -d "$ctx_dir" ]]; then
-    echo "  Context:   ${ctx_dir} (directory, not symlinked)"
+    target=$(readlink "$CONTEXT_DIR")
+    echo "  Context:   ${CONTEXT_DIR} -> ${target}"
+  elif [[ -d "$CONTEXT_DIR" ]]; then
+    echo "  Context:   ${CONTEXT_DIR} (directory, not symlinked)"
   else
-    echo "  Context:   ${ctx_dir} (not found)"
+    echo "  Context:   ${CONTEXT_DIR} (not found)"
   fi
   echo ""
 
