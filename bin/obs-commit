@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# obs-commit — log git commits to Obsidian
+#
+# Usage:
+#   obs-commit              # log most recent commit
+#   obs-commit abc123       # log specific commit
+#   obs-commit --install    # install git post-commit hook
+#
+# Called automatically via git post-commit hook
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=obs-lib
+source "${SCRIPT_DIR}/obs-lib"
+
+install_hook() {
+  local git_dir
+  git_dir=$(git rev-parse --git-dir 2>/dev/null) || {
+    echo "[obs-commit] error: not in a git repository" >&2
+    return 1
+  }
+  
+  local hook_file="${git_dir}/hooks/post-commit"
+  
+  if [[ -f "$hook_file" ]]; then
+    if grep -q "obs-commit" "$hook_file"; then
+      echo "[obs-commit] hook already installed"
+      return 0
+    fi
+    # Append to existing hook
+    echo "" >> "$hook_file"
+    echo "# Log commit to Obsidian" >> "$hook_file"
+    echo 'obs-commit 2>/dev/null || true' >> "$hook_file"
+  else
+    cat > "$hook_file" <<'EOF'
+#!/usr/bin/env bash
+# Log commit to Obsidian
+obs-commit 2>/dev/null || true
+EOF
+  fi
+  
+  chmod +x "$hook_file"
+  echo "[obs-commit] installed hook: ${hook_file}"
+}
+
+log_commit() {
+  local commit_hash="${1:-HEAD}"
+  
+  # Get commit info
+  local hash message files_changed
+  hash=$(git rev-parse --short "$commit_hash" 2>/dev/null) || return 1
+  message=$(git log -1 --format='%s' "$commit_hash" 2>/dev/null) || return 1
+  files_changed=$(git diff-tree --no-commit-id --name-only -r "$commit_hash" 2>/dev/null | wc -l | tr -d ' ')
+  
+  # Log to Obsidian
+  if obs_vault_set || obs_cli_available; then
+    obs_log_commit "$hash" "$message" "$files_changed"
+    echo "[obs-commit] logged: ${hash} — ${message}"
+  fi
+}
+
+case "${1:-}" in
+  --install|-i)
+    install_hook
+    ;;
+  --help|-h)
+    echo "Usage: obs-commit [commit-hash | --install]"
+    echo "  (no args)   log most recent commit"
+    echo "  --install   install git post-commit hook"
+    ;;
+  "")
+    log_commit HEAD
+    ;;
+  *)
+    log_commit "$1"
+    ;;
+esac
