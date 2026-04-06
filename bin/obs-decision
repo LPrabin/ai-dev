@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# obs-decision — create ADR-style decision records in Obsidian
+#
+# Usage:
+#   obs-decision "Title"              # interactive ADR creation
+#   obs-decision --quick "Title"      # quick one-liner decision
+#
+# Creates numbered decision files: decisions/001-title.md
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=obs-lib
+source "${SCRIPT_DIR}/obs-lib"
+
+obs_require_vault
+
+quick_decision() {
+  local title="$1"
+  local filepath
+  filepath=$(obs_create_decision \
+    "$title" \
+    "Quick decision during development." \
+    "$title" \
+    "N/A" \
+    "To be determined." \
+    "${AI_AGENT:-cli}")
+  echo "[obs-decision] created: ${filepath}"
+}
+
+interactive_decision() {
+  local title="$1"
+  
+  echo "Creating decision record: ${title}"
+  echo ""
+  
+  local tmpfile
+  tmpfile=$(mktemp /tmp/obs-decision-XXXXXX.md)
+  
+  cat > "$tmpfile" <<EOF
+# Decision: ${title}
+
+## Context
+<!-- What is the issue/question that requires a decision? -->
+
+
+## Decision
+<!-- What did you decide? -->
+
+
+## Alternatives Rejected
+<!-- What other options did you consider? Why were they rejected? -->
+- 
+
+## Consequences
+<!-- What are the implications of this decision? -->
+- 
+EOF
+
+  "${EDITOR:-vi}" "$tmpfile"
+  
+  # Parse the file
+  local context decision alternatives consequences
+  context=$(sed -n '/^## Context/,/^## Decision/p' "$tmpfile" | grep -v '^##' | grep -v '^<!--' | sed '/^$/d')
+  decision=$(sed -n '/^## Decision/,/^## Alternatives/p' "$tmpfile" | grep -v '^##' | grep -v '^<!--' | sed '/^$/d')
+  alternatives=$(sed -n '/^## Alternatives/,/^## Consequences/p' "$tmpfile" | grep -v '^##' | grep -v '^<!--' | sed '/^$/d')
+  consequences=$(sed -n '/^## Consequences/,/^$/p' "$tmpfile" | grep -v '^##' | grep -v '^<!--' | sed '/^$/d')
+  
+  rm -f "$tmpfile"
+  
+  if [[ -z "$context" ]] && [[ -z "$decision" ]]; then
+    echo "[obs-decision] cancelled (empty content)"
+    return 1
+  fi
+  
+  local filepath
+  filepath=$(obs_create_decision \
+    "$title" \
+    "${context:-No context provided.}" \
+    "${decision:-No decision documented.}" \
+    "${alternatives:-None documented.}" \
+    "${consequences:-None documented.}" \
+    "${AI_AGENT:-cli}")
+  
+  echo "[obs-decision] created: ${filepath}"
+  
+  # Also log to changelog
+  local log_entry="- [[${filepath}|${title}]]"
+  obs_write_note "$(obs_changelog_note)" "Decision recorded: ${log_entry}"
+}
+
+case "${1:-}" in
+  --quick|-q)
+    shift
+    [[ -z "${1:-}" ]] && { echo "Usage: obs-decision --quick \"Title\"" >&2; exit 1; }
+    quick_decision "$1"
+    ;;
+  --help|-h)
+    echo "Usage: obs-decision [--quick] \"Title\""
+    echo "  (no flag)   interactive ADR creation"
+    echo "  --quick     quick one-liner decision"
+    ;;
+  "")
+    echo "Usage: obs-decision \"Title\"" >&2
+    exit 1
+    ;;
+  *)
+    interactive_decision "$1"
+    ;;
+esac
