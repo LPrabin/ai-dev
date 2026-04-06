@@ -176,6 +176,111 @@ See [obsidian-setup.md](obsidian-setup.md) for full setup instructions.
 
 ---
 
+## Mode switching
+
+Switch between **work** and **self** personas with full config swap:
+
+```bash
+ai-mode work    # GitLab conventions, professional tone
+ai-mode self    # GitHub conventions, learning-focused
+ai-mode         # show current status
+```
+
+Mode directories at `~/.ai/modes/{work,self}/` contain:
+- `identity.md` — persona and communication style
+- `tools.md` — git workflow and tooling conventions
+- `rules/` — mode-specific rules
+
+When you switch modes, `~/.ai/context/` becomes a symlink to the active mode directory, and `build-context` is automatically called.
+
+---
+
+## Enhanced Obsidian logging
+
+Log structured data to Obsidian:
+
+```bash
+# Log commits automatically (install git hook)
+obs-commit --install
+obs-commit           # log most recent commit manually
+
+# Create ADR-style decisions
+obs-decision "Use PostgreSQL for persistence"
+obs-decision --quick "Quick decision"
+
+# Structured changelog entries
+obs-write --changelog "Feature complete"
+```
+
+All logs go to project-specific files in Obsidian:
+- `changelog.md` — session summaries
+- `commits.md` — git commit log
+- `decisions/` — ADR-style decision records
+
+---
+
+## Agent handoff
+
+Switch between AI tools (Claude Code, Codex, OpenCode) mid-session without losing context:
+
+```bash
+# Before switching to another agent
+ai-handoff codex     # saves context, shows pickup instructions
+
+# In the new agent
+obs-read --all       # loads previous session context
+
+# Show last handoff context
+ai-handoff --resume
+```
+
+Context is saved to Obsidian's `context.md` including:
+- Current tasks and decisions
+- Git status and branch
+- What was being worked on
+- What needs to happen next
+
+---
+
+## Multi-repo workspaces
+
+For projects with multiple repositories:
+
+```bash
+mkdir my-workspace && cd my-workspace
+ai-init --multi-repo my-project
+```
+
+Creates:
+```
+AGENTS.md             -> docs/workspace/AGENTS.md
+.claude/commands/     -> docs/workspace/commands/
+docs/workspace/       — workspace configuration
+docs/progress/        — progress tracking
+docs/tests/e2e/       — E2E tests
+taskboard/            — GitLab issues (work mode only)
+```
+
+Run AI tools from the workspace root. Each sub-repo has its own git history but shares the workspace context.
+
+---
+
+## MCP server management
+
+Manage MCP servers across all AI tools from one registry:
+
+```bash
+ai-mcp list              # show all registered servers
+ai-mcp enable serena     # enable and auto-distribute to all tools
+ai-mcp disable serena    # disable and auto-remove from all tools
+ai-mcp distribute all    # manually redistribute to all tools
+ai-mcp status            # show where servers are deployed
+```
+
+When you enable/disable a server, it's automatically distributed to all supported tools (Claude Code, Codex, OpenCode).
+
+---
+
 ## Extending
 
 **Add a new rule**: create `~/.ai/context/rules/myteam.md`, run `build-context --adapter all`.
