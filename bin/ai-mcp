@@ -1,0 +1,382 @@
+#!/usr/bin/env bash
+# ai-mcp — manage the unified MCP server registry
+#
+# Usage:
+#   ai-mcp list                     list all servers and status
+#   ai-mcp enable <name>            enable a server
+#   ai-mcp disable <name>           disable a server
+#   ai-mcp add <name> <json>        add a new server entry
+#   ai-mcp remove <name>            remove a server entry
+#   ai-mcp distribute [tool]        push MCP config to AI tools (claude-code|codex|opencode|all)
+#   ai-mcp status                   show what's configured in each tool
+#
+# The registry lives at ~/.ai/context/mcp-servers.json
+# Adapters read it during build-context to write tool-specific configs.
+
+set -eo pipefail
+
+AI_HOME="${AI_HOME:-$HOME/.ai}"
+REGISTRY="${AI_HOME}/context/mcp-servers.json"
+
+die() { echo "[ai-mcp] error: $*" >&2; exit 1; }
+
+require_jq() {
+  command -v jq >/dev/null 2>&1 || die "jq is required. Install: brew install jq"
+}
+
+require_registry() {
+  [[ -f "$REGISTRY" ]] || die "registry not found: ${REGISTRY}. Run from ai-dev repo."
+}
+
+cmd_list() {
+  require_jq
+  require_registry
+  echo "MCP Server Registry: ${REGISTRY}"
+  echo ""
+  printf "%-15s %-8s %-15s %s\n" "NAME" "STATUS" "TAGS" "DESCRIPTION"
+  printf "%-15s %-8s %-15s %s\n" "----" "------" "----" "-----------"
+
+  jq -r '.servers | to_entries[] | [
+    .key,
+    (if .value.enabled then "ON" else "OFF" end),
+    (.value.tags // [] | join(",")),
+    .value.description
+  ] | @tsv' "$REGISTRY" | while IFS=$'\t' read -r name status tags desc; do
+    printf "%-15s %-8s %-15s %s\n" "$name" "$status" "$tags" "$desc"
+  done
+}
+
+cmd_enable() {
+  local name="${1:?usage: ai-mcp enable <name>}"
+  require_jq
+  require_registry
+
+  jq --arg n "$name" '
+    if .servers[$n] then .servers[$n].enabled = true
+    else error("server not found: " + $n)
+    end
+  ' "$REGISTRY" > "${REGISTRY}.tmp" && mv "${REGISTRY}.tmp" "$REGISTRY"
+  echo "[ai-mcp] enabled: ${name}"
+  cmd_distribute all
+}
+
+cmd_disable() {
+  local name="${1:?usage: ai-mcp disable <name>}"
+  require_jq
+  require_registry
+
+  jq --arg n "$name" '
+    if .servers[$n] then .servers[$n].enabled = false
+    else error("server not found: " + $n)
+    end
+  ' "$REGISTRY" > "${REGISTRY}.tmp" && mv "${REGISTRY}.tmp" "$REGISTRY"
+  echo "[ai-mcp] disabled: ${name}"
+  cmd_distribute all
+}
+
+cmd_add() {
+  local name="${1:?usage: ai-mcp add <name> '<json>'}"
+  local json="${2:?usage: ai-mcp add <name> '<json>'}"
+  require_jq
+  require_registry
+
+  echo "$json" | jq . >/dev/null 2>&1 || die "invalid JSON: ${json}"
+
+  jq --arg n "$name" --argjson v "$json" '
+    .servers[$n] = $v
+  ' "$REGISTRY" > "${REGISTRY}.tmp" && mv "${REGISTRY}.tmp" "$REGISTRY"
+  echo "[ai-mcp] added: ${name}"
+}
+
+cmd_remove() {
+  local name="${1:?usage: ai-mcp remove <name>}"
+  require_jq
+  require_registry
+
+  jq --arg n "$name" 'del(.servers[$n])' "$REGISTRY" > "${REGISTRY}.tmp" \
+    && mv "${REGISTRY}.tmp" "$REGISTRY"
+  echo "[ai-mcp] removed: ${name}"
+}
+
+cmd_distribute() {
+  local tool="${1:-all}"
+  require_jq
+  require_registry
+
+  case "$tool" in
+    claude-code) _distribute_claude ;;
+    codex)       _distribute_codex ;;
+    opencode)    _distribute_opencode ;;
+    all)
+      _distribute_claude
+      _distribute_codex
+      _distribute_opencode
+      ;;
+    *) die "unknown tool: ${tool}. Use: claude-code|codex|opencode|all" ;;
+  esac
+}
+
+# ── Claude Code ──────────────────────────────────────────────────
+# Uses `claude mcp add-json` for reliable config. Falls back to add-json
+# which accepts a JSON blob and avoids flag-parsing issues with `--`.
+_distribute_claude() {
+  if ! command -v claude >/dev/null 2>&1; then
+    echo "[ai-mcp] claude-code: skipped (claude CLI not found)"
+    return
+  fi
+
+  local count=0
+
+  # Get list of enabled servers
+  local names
+  names=$(jq -r '.servers | to_entries[] | select(.value.enabled) | .key' "$REGISTRY")
+
+  for name in $names; do
+    # Remove if exists (idempotent)
+    claude mcp remove "$name" >/dev/null 2>&1 || true
+
+    # Build the JSON blob for add-json
+    local server_json
+    local has_url
+    has_url=$(jq -r --arg n "$name" '.servers[$n].url // empty' "$REGISTRY")
+
+    if [[ -n "$has_url" ]]; then
+      # HTTP/remote server
+      server_json=$(jq -c --arg n "$name" '{
+        type: "http",
+        url: .servers[$n].url
+      } + (
+        if (.servers[$n].headers // {} | length) > 0
+        then { headers: .servers[$n].headers }
+        else {} end
+      )' "$REGISTRY")
+    else
+      # Stdio server
+      server_json=$(jq -c --arg n "$name" '{
+        type: "stdio",
+        command: .servers[$n].command,
+        args: (.servers[$n].args // [])
+      } + (
+        if (.servers[$n].env // {} | length) > 0
+        then { env: .servers[$n].env }
+        else {} end
+      )' "$REGISTRY")
+    fi
+
+    claude mcp add-json "$name" "$server_json" >/dev/null 2>&1
+    echo "[ai-mcp] claude-code: added ${name}"
+    count=$((count + 1))
+  done
+
+  echo "[ai-mcp] claude-code: done — ${count} server(s) (use 'claude mcp list' to verify)"
+}
+
+# ── Codex ────────────────────────────────────────────────────────
+# Uses TOML config at ~/.codex/config.toml
+# Key: [mcp_servers.<name>]
+# Stdio: command = "cmd", args = ["arg1"]
+# HTTP:  url = "https://..."
+_distribute_codex() {
+  local config_file="$HOME/.codex/config.toml"
+  mkdir -p "$HOME/.codex"
+
+  # Read existing config, strip any [mcp_servers.*] sections we'll rewrite
+  local existing_content=""
+  if [[ -f "$config_file" ]]; then
+    # Keep everything before the first [mcp_servers. block
+    existing_content=$(awk '
+      /^\[mcp_servers\./ { skip=1 }
+      /^\[/ && !/^\[mcp_servers\./ { skip=0 }
+      !skip { print }
+    ' "$config_file")
+  fi
+
+  # Start building new content
+  local mcp_toml=""
+  local count=0
+
+  while read -r name; do
+    local server
+    server=$(jq -r --arg n "$name" '.servers[$n]' "$REGISTRY")
+    local has_url
+    has_url=$(echo "$server" | jq -r '.url // empty')
+
+    mcp_toml="${mcp_toml}
+[mcp_servers.${name}]"
+
+    if [[ -n "$has_url" ]]; then
+      mcp_toml="${mcp_toml}
+url = \"${has_url}\""
+
+      # bearer_token_env_var (check for common patterns)
+      local auth_header
+      auth_header=$(echo "$server" | jq -r '.headers // {} | to_entries[] | select(.key | test("auth|token|api.key"; "i")) | .value' 2>/dev/null | head -1)
+      if [[ "$auth_header" == \$\{*\} ]]; then
+        local env_var="${auth_header#\$\{}"
+        env_var="${env_var%\}}"
+        mcp_toml="${mcp_toml}
+bearer_token_env_var = \"${env_var}\""
+      fi
+
+      # Extra headers
+      local header_pairs
+      header_pairs=$(echo "$server" | jq -r '.headers // {} | to_entries[] | "\(.key) = \"\(.value)\""' 2>/dev/null || true)
+      if [[ -n "$header_pairs" ]]; then
+        mcp_toml="${mcp_toml}
+http_headers = { $(echo "$server" | jq -r '.headers // {} | to_entries | map("\"\(.key)\" = \"\(.value)\"") | join(", ")') }"
+      fi
+    else
+      local cmd
+      cmd=$(echo "$server" | jq -r '.command')
+      local args_toml
+      args_toml=$(echo "$server" | jq -c '.args // []' | sed 's/,/, /g')
+      mcp_toml="${mcp_toml}
+command = \"${cmd}\"
+args = ${args_toml}"
+
+      # Environment variables
+      local env_entries
+      env_entries=$(echo "$server" | jq -r '.env // {} | to_entries[] | "\(.key) = \"\(.value)\""' 2>/dev/null || true)
+      if [[ -n "$env_entries" ]]; then
+        mcp_toml="${mcp_toml}
+
+[mcp_servers.${name}.env]
+${env_entries}"
+      fi
+    fi
+
+    mcp_toml="${mcp_toml}
+"
+    count=$((count + 1))
+  done < <(jq -r '.servers | to_entries[] | select(.value.enabled) | .key' "$REGISTRY")
+
+  # Write config
+  {
+    echo "${existing_content}"
+    echo "${mcp_toml}"
+  } > "$config_file"
+
+  echo "[ai-mcp] codex: wrote ${count} MCP server(s) to ${config_file}"
+}
+
+# ── OpenCode ─────────────────────────────────────────────────────
+# Uses JSON config at ~/.config/opencode/opencode.json
+# Key: "mcp" (NOT "mcpServers")
+# Stdio: { "type": "local", "command": ["cmd", "arg1", ...] }
+# HTTP:  { "type": "remote", "url": "https://..." }
+_distribute_opencode() {
+  local oc_dir="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+  local config_file="${oc_dir}/opencode.json"
+  mkdir -p "$oc_dir"
+
+  # Build the "mcp" object in OpenCode's format
+  local mcp_config
+  mcp_config=$(jq '{
+    mcp: (
+      .servers | to_entries
+      | map(select(.value.enabled))
+      | map({
+          key: .key,
+          value: (
+            if .value.url then
+              { type: "remote", url: .value.url, enabled: true } +
+              (if .value.headers then { headers: .value.headers } else {} end)
+            else
+              {
+                type: "local",
+                command: ([.value.command] + (.value.args // [])),
+                enabled: true
+              } +
+              (if (.value.env // {} | length) > 0 then { environment: .value.env } else {} end)
+            end
+          )
+        })
+      | from_entries
+    )
+  }' "$REGISTRY")
+
+  if [[ -f "$config_file" ]]; then
+    # Merge mcp into existing config, preserving other keys
+    jq -s '.[0] * { mcp: .[1].mcp }' \
+      "$config_file" <(echo "$mcp_config") > "${config_file}.tmp" \
+      && mv "${config_file}.tmp" "$config_file"
+  else
+    echo "$mcp_config" | jq '.' > "$config_file"
+  fi
+
+  local count
+  count=$(echo "$mcp_config" | jq '.mcp | length')
+  echo "[ai-mcp] opencode: wrote ${count} MCP server(s) to ${config_file}"
+}
+
+cmd_status() {
+  require_jq
+  echo "=== MCP Distribution Status ==="
+  echo ""
+
+  # Claude Code — use CLI if available
+  printf "%-12s " "Claude Code:"
+  if command -v claude >/dev/null 2>&1; then
+    local claude_list
+    claude_list=$(claude mcp list 2>/dev/null || true)
+    if [[ "$claude_list" == *"No MCP servers"* ]] || [[ -z "$claude_list" ]]; then
+      echo "0 server(s) (via claude mcp list)"
+    else
+      local names
+      names=$(echo "$claude_list" | grep -oE '^\S+' | paste -sd', ' -)
+      echo "[${names}] (via claude mcp list)"
+    fi
+  else
+    echo "claude CLI not found"
+  fi
+
+  # Codex — TOML config
+  printf "%-12s " "Codex:"
+  local codex_config="$HOME/.codex/config.toml"
+  if [[ -f "$codex_config" ]]; then
+    local codex_names
+    codex_names=$(grep -oP '^\[mcp_servers\.\K[^\]]+' "$codex_config" 2>/dev/null | paste -sd', ' -)
+    local codex_count
+    codex_count=$(grep -c '^\[mcp_servers\.' "$codex_config" 2>/dev/null || echo 0)
+    echo "${codex_count} server(s) [${codex_names:-none}] — ${codex_config}"
+  else
+    echo "no config — ${codex_config}"
+  fi
+
+  # OpenCode — JSON with "mcp" key
+  printf "%-12s " "OpenCode:"
+  local oc_config="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json"
+  if [[ -f "$oc_config" ]]; then
+    local oc_count
+    oc_count=$(jq '.mcp // {} | length' "$oc_config" 2>/dev/null || echo 0)
+    local oc_names
+    oc_names=$(jq -r '.mcp // {} | keys | join(", ")' "$oc_config" 2>/dev/null || echo "none")
+    echo "${oc_count} server(s) [${oc_names}] — ${oc_config}"
+  else
+    echo "no config — ${oc_config}"
+  fi
+}
+
+# Main
+case "${1:-help}" in
+  list)       cmd_list ;;
+  enable)     cmd_enable "${2:-}" ;;
+  disable)    cmd_disable "${2:-}" ;;
+  add)        cmd_add "${2:-}" "${3:-}" ;;
+  remove)     cmd_remove "${2:-}" ;;
+  distribute) cmd_distribute "${2:-all}" ;;
+  status)     cmd_status ;;
+  help|--help|-h)
+    echo "Usage: ai-mcp <command> [args]"
+    echo ""
+    echo "Commands:"
+    echo "  list                     List all MCP servers and status"
+    echo "  enable <name>            Enable a server"
+    echo "  disable <name>           Disable a server"
+    echo "  add <name> '<json>'      Add a new server"
+    echo "  remove <name>            Remove a server"
+    echo "  distribute [tool]        Push config to tools (claude-code|codex|opencode|all)"
+    echo "  status                   Show what's configured in each tool"
+    ;;
+  *) die "unknown command: $1. Run: ai-mcp help" ;;
+esac
