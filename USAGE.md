@@ -1,47 +1,99 @@
 # ai-dev Usage Guide
 
-Complete reference for every command, flow, and pattern in ai-dev.
+Complete reference for the ai-dev system — a git-driven workflow for AI-assisted development with Obsidian integration.
 
 ---
 
 ## Table of Contents
 
-1. [First-Time Setup](#1-first-time-setup)
-2. [Session Lifecycle](#2-session-lifecycle)
-3. [Work Mode — Project Development](#3-work-mode--project-development)
-4. [Self Mode — Learning & Exploration](#4-self-mode--learning--exploration)
-5. [Cross-Linking Work and Self](#5-cross-linking-work-and-self)
-6. [Command Reference](#6-command-reference)
-7. [Obsidian Vault Management](#7-obsidian-vault-management)
-8. [Multi-Agent Workflow](#8-multi-agent-workflow)
-9. [Context System Deep Dive](#9-context-system-deep-dive)
-10. [Real-World Flows](#10-real-world-flows)
+1. [Architecture Overview](#1-architecture-overview)
+2. [First-Time Setup](#2-first-time-setup)
+3. [Deployment Workflow](#3-deployment-workflow)
+4. [Mode Switching](#4-mode-switching)
+5. [Session Lifecycle](#5-session-lifecycle)
+6. [Work Mode — Project Development](#6-work-mode--project-development)
+7. [Self Mode — Learning & Exploration](#7-self-mode--learning--exploration)
+8. [Cross-Linking Work and Self](#8-cross-linking-work-and-self)
+9. [Command Reference](#9-command-reference)
+10. [Context System Deep Dive](#10-context-system-deep-dive)
+11. [Multi-Agent Workflow](#11-multi-agent-workflow)
+12. [Obsidian Vault Management](#12-obsidian-vault-management)
+13. [Real-World Flows](#13-real-world-flows)
 
 ---
 
-## 1. First-Time Setup
+## 1. Architecture Overview
 
-### 1.1 Install ai-dev globally
+ai-dev uses a **source → runtime** deployment model:
+
+```
+~/.ai-dev (source/git repo)           ~/.ai (runtime)
+├── modes/                     ──→    ├── modes/
+│   ├── work/                         │   ├── work/
+│   │   ├── identity.md               │   │   ├── identity.md
+│   │   ├── tools.md                  │   │   ├── tools.md
+│   │   └── rules/                    │   │   └── rules/
+│   └── self/                         │   └── self/
+│       ├── identity.md               │       └── ...
+│       ├── tools.md                  ├── shared/
+│       └── rules/                    │   ├── agents/
+├── shared/                           │   ├── skills/
+│   ├── agents/                       │   └── mcp-servers.json
+│   ├── skills/                       ├── bin/
+│   └── mcp-servers.json              ├── template/
+├── bin/                              ├── prompts/
+├── template/                         │   └── global.md
+├── .githooks/                        ├── context → modes/work (symlink)
+│   └── post-commit                   └── .deployed
+└── specs/
+```
+
+### Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| **Source** (`~/.ai-dev`) | Git repository. Edit files here. |
+| **Runtime** (`~/.ai`) | Deployed files. AI tools read from here. |
+| **Deploy** | `ai-deploy` rsyncs source → runtime, then runs `build-context` |
+| **Auto-deploy** | Git post-commit hook triggers deploy automatically |
+| **Modes** | `work` and `self` — different identities, tools, rules |
+| **Shared** | Agents, skills, MCP servers — same across modes |
+
+### Design Principles
+
+1. **Git is the source of truth** — All config lives in `~/.ai-dev`, version controlled
+2. **Instant mode switching** — Just a symlink change, no rebuild needed
+3. **Auto-deploy on commit** — Push changes by committing; hook handles the rest
+4. **Separation of concerns** — Mode-specific vs shared content clearly organized
+
+---
+
+## 2. First-Time Setup
+
+### 2.1 Clone and deploy
 
 ```bash
+# Clone the repository
 git clone https://github.com/yourname/ai-dev ~/.ai-dev
-cd ~/.ai-dev
-./bin/ai-init --global-install
+
+# Initial deploy to runtime
+~/.ai-dev/bin/ai-deploy
+
+# Install the git hook for auto-deploy
+~/.ai-dev/bin/ai-deploy --install-hook
+
+# Add to PATH (in ~/.zshrc)
+export PATH="$HOME/.ai/bin:$PATH"
 source ~/.zshrc
 ```
 
-This installs:
-- `~/.ai/context/` — identity, rules, skills, agents
-- `~/.ai/skills/` — bundled skills (obsidian-cli, obsidian-markdown)
-- `~/.ai/bin/` — all commands symlinked to PATH
-- Shell environment block in `~/.zshrc`
+### 2.2 Configure your Obsidian vault
 
-### 1.2 Configure your vault
-
-Edit `~/.zshrc` and set your vault path:
+Edit `~/.zshrc`:
 
 ```bash
 export OBSIDIAN_VAULT="$HOME/Documents/Brain"
+export AI_MODE="work"  # or "self"
 ```
 
 Then initialize the vault structure:
@@ -59,22 +111,31 @@ Brain/
 └── Library/             # cross-cutting shared knowledge
     ├── Decisions/
     ├── Skills/
-    └── Errors/
+    ├── Agents/
+    └── AgentConfig/     # optional: Obsidian as source of truth
 ```
 
-### 1.3 Verify everything works
+### 2.3 Verify installation
 
 ```bash
-ai-mode              # shows current status, vault path, transport
-ai-mode --list       # lists all projects and topics (empty at first)
+# Check deployment status
+cat ~/.ai/.deployed
+
+# Check mode status
+ai-mode
+
+# Test mode switching
+ai-mode work
+ai-mode self
+ai-mode work
 ```
 
-### 1.4 Transport detection
+### 2.4 Transport detection
 
 ai-dev automatically detects what's available:
 
 | Transport | Detected when | Features |
-|---|---|---|
+|-----------|---------------|----------|
 | **Obsidian CLI** | `obsidian` command exists | Full: search, tasks, daily notes, properties, backlinks |
 | **Filesystem** | `OBSIDIAN_VAULT` directory exists | Basic: read, write, append, grep-based search |
 
@@ -82,7 +143,165 @@ You don't configure this. `obs-lib` handles it transparently.
 
 ---
 
-## 2. Session Lifecycle
+## 3. Deployment Workflow
+
+### 3.1 How deployment works
+
+When you run `ai-deploy`:
+
+1. **Rsync** copies `bin/`, `modes/`, `shared/`, `template/` to `~/.ai/`
+2. **Symlink** ensures `~/.ai/context` points to current mode
+3. **build-context** assembles prompts and pushes to AI tools
+4. **Metadata** written to `~/.ai/.deployed`
+
+### 3.2 Manual deploy
+
+```bash
+# Full deploy
+ai-deploy
+
+# Dry run (see what would change)
+ai-deploy --dry-run
+
+# Quiet mode (for scripts)
+ai-deploy --quiet
+```
+
+### 3.3 Auto-deploy via git hook
+
+After installing the hook (`ai-deploy --install-hook`), every commit triggers deployment:
+
+```bash
+cd ~/.ai-dev
+
+# Edit a file
+vim modes/work/rules/python.md
+
+# Commit — auto-deploy runs
+git add -A
+git commit -m "feat: add new Python rule"
+
+# Verify
+cat ~/.ai/.deployed
+# Shows: commit: abc1234, timestamp: 2026-04-07 17:30:00
+```
+
+### 3.4 What gets deployed
+
+| Source | Destination | Notes |
+|--------|-------------|-------|
+| `bin/` | `~/.ai/bin/` | All scripts |
+| `modes/` | `~/.ai/modes/` | Work and self mode configs |
+| `shared/` | `~/.ai/shared/` | Agents, skills, MCP servers |
+| `template/` | `~/.ai/template/` | Project scaffolding templates |
+
+### 3.5 What's excluded from deploy
+
+- `.git/` — Git internals
+- `.githooks/` — Hooks stay in source only
+- `specs/` — Design specs and plans
+- `prompts/` — Generated at deploy time
+- `.env` — Preserved in runtime
+- `*.pdf`, `.DS_Store` — Non-essential files
+
+### 3.6 Editing workflow
+
+```bash
+# 1. Edit in source
+cd ~/.ai-dev
+vim shared/skills/python.md
+
+# 2. Test locally (optional)
+ai-deploy --dry-run
+
+# 3. Commit to deploy
+git add -A
+git commit -m "docs: improve Python skill"
+
+# Done! Changes are now in ~/.ai and pushed to all AI tools
+```
+
+---
+
+## 4. Mode Switching
+
+### 4.1 Two modes
+
+| Mode | Purpose | Identity | Tools |
+|------|---------|----------|-------|
+| **work** | Shipping code at company | Senior engineer, team-oriented | GitLab (`glab`), company conventions |
+| **self** | Personal learning & projects | Curious explorer | GitHub (`gh`), experimentation |
+
+### 4.2 Switch modes
+
+```bash
+# Switch to work mode
+ai-mode work
+
+# Switch to self mode  
+ai-mode self
+
+# Check current mode
+ai-mode
+```
+
+Mode switching is **instant** — it just updates the `~/.ai/context` symlink:
+
+```
+~/.ai/context → ~/.ai/modes/work   (work mode)
+~/.ai/context → ~/.ai/modes/self   (self mode)
+```
+
+### 4.3 Mode-specific files
+
+Each mode has its own:
+
+```
+modes/work/
+├── identity.md    # Who you are in this mode
+├── tools.md       # Git remote, CLI tools
+└── rules/
+    ├── general.md
+    ├── python.md
+    └── security.md
+
+modes/self/
+├── identity.md
+├── tools.md
+└── rules/
+    └── ...
+```
+
+### 4.4 Shared across modes
+
+These files are the same regardless of mode:
+
+```
+shared/
+├── agents/
+│   ├── planner.md
+│   └── reviewer.md
+├── skills/
+│   ├── debugging.md
+│   ├── git-worktrees.md
+│   ├── python.md
+│   ├── security-audit.md
+│   └── tdd.md
+└── mcp-servers.json
+```
+
+### 4.5 Quick aliases
+
+Add to `~/.zshrc`:
+
+```bash
+alias ai-work='ai-mode work'
+alias ai-self='ai-mode self'
+```
+
+---
+
+## 5. Session Lifecycle
 
 Every AI coding session follows this cycle:
 
@@ -99,7 +318,7 @@ Every AI coding session follows this cycle:
 │  3. Log as you go                           │
 │     → obs-write --decision "..."            │
 │     → obs-write --fix "..."                 │
-│     → obs-write --skill "..."              │
+│     → obs-write --skill "..."               │
 ├─────────────────────────────────────────────┤
 │  4. Review before shipping                  │
 │     → ai-review                             │
@@ -110,7 +329,7 @@ Every AI coding session follows this cycle:
 └─────────────────────────────────────────────┘
 ```
 
-### 2.1 Starting a session
+### 5.1 Starting a session
 
 ```bash
 # Basic — uses current AI_MODE and directory name
@@ -132,7 +351,7 @@ ai-start --rebuild
 - Today's daily note (if CLI available)
 - Quick reference of available commands
 
-### 2.2 During a session
+### 5.2 During a session
 
 **Log decisions as you make them:**
 ```bash
@@ -157,9 +376,7 @@ obs-write --skill "pytest.mark.parametrize with indirect fixtures for DB variant
 obs-write --session "Completed auth module, starting rate limiting next"
 ```
 
-All logs are timestamped and written to both the category log (`Decisions/log.md`, etc.) and the daily session file (`Sessions/YYYY-MM-DD.md`).
-
-### 2.3 Code review and shipping
+### 5.3 Code review and shipping
 
 ```bash
 # Before committing — run linters + AI review
@@ -172,71 +389,24 @@ ai-review --lint-only
 ai-ship
 ```
 
-`ai-review` runs: ruff, black (check), mypy, bandit, secret scan, then asks your AI tool for a review.
-
-`ai-ship` runs: pytest, mypy, ruff, bandit, pip-audit, secret scan, branch check, and logs the ship event to Obsidian.
-
-### 2.4 Debugging
-
-```bash
-# Interactive debug session
-ai-debug
-
-# Run specific test in debug mode
-ai-debug --test tests/test_auth.py
-
-# Analyze a specific error
-ai-debug --error "TypeError: 'NoneType' object is not subscriptable"
-
-# Profile performance
-ai-debug --profile module.function
-```
-
-### 2.5 Ending a session
+### 5.4 Ending a session
 
 ```bash
 obs-write
 ```
 
-Opens your `$EDITOR` with a pre-filled template:
-
-```markdown
-## [14:30] my-project — work session
-
-### Decisions
--
-
-### Fixes / discoveries
--
-
-### Skills learned
--
-
-### Open
--
-
-### Notes
--
-```
-
-Fill it in, save, close. It's written to `Sessions/YYYY-MM-DD.md` in your vault.
-
-You can also pipe content:
-
-```bash
-echo "Quick note: auth module complete" | obs-write
-```
+Opens your `$EDITOR` with a pre-filled template. Fill it in, save, close.
 
 ---
 
-## 3. Work Mode — Project Development
+## 6. Work Mode — Project Development
 
 Work mode is for shipping code. Each project gets its own vault folder.
 
-### 3.1 Scaffold a new project
+### 6.1 Scaffold a new project
 
 ```bash
-ai-work                      # ensure work mode
+ai-work                       # ensure work mode
 cd ~/code/my-api
 ai-init                       # uses directory name: "my-api"
 # or
@@ -264,7 +434,7 @@ Brain/Work/Projects/my-api/
 └── Errors/log.md             # bug fixes
 ```
 
-### 3.2 Edit AGENTS.md
+### 6.2 Edit AGENTS.md
 
 This is your highest-leverage file. Keep it under 200 lines. Include:
 
@@ -274,12 +444,12 @@ This is your highest-leverage file. Keep it under 200 lines. Include:
 - Conventions that differ from defaults
 - Known gotchas
 
-### 3.3 Edit Session.md
+### 6.3 Edit Session.md
 
-Session.md is your **task handoff** between you and the AI. Before starting a session, update it:
+Session.md is your **task handoff** between you and the AI:
 
 ```markdown
-# Session — 2026-03-31
+# Session — 2026-04-07
 
 ## Tasks
 - [ ] Implement rate limiting middleware
@@ -291,25 +461,17 @@ Session.md is your **task handoff** between you and the AI. Before starting a se
 - Redis: connect via connection pool, not per-request
 ```
 
-### 3.4 List all projects
-
-```bash
-ai-mode --list
-```
-
-Shows all projects with open task counts.
-
 ---
 
-## 4. Self Mode — Learning & Exploration
+## 7. Self Mode — Learning & Exploration
 
 Self mode is for building knowledge. Each topic gets its own vault folder.
 
-### 4.1 Create a new topic
+### 7.1 Create a new topic
 
 ```bash
 ai-self                       # switch to self mode
-cd ~/learning/rust            # or any directory — name is auto-detected
+cd ~/learning/rust
 ai-init rust                  # creates topic structure
 ```
 
@@ -324,10 +486,10 @@ Brain/Self/Topics/rust/
 └── Errors/log.md
 ```
 
-### 4.2 Self mode tasks are exploratory
+### 7.2 Self mode tasks are exploratory
 
 ```markdown
-# Session — 2026-03-31
+# Session — 2026-04-07
 
 ## Tasks
 - [ ] Understand ownership and borrowing model
@@ -339,20 +501,13 @@ Brain/Self/Topics/rust/
 - Jon Gjengset's YouTube channel
 ```
 
-### 4.3 Log learnings
-
-```bash
-obs-write --skill "Rust lifetimes: 'a means 'at least as long as a'"
-obs-write --decision "Using anyhow for applications, thiserror for libraries"
-```
-
 ---
 
-## 5. Cross-Linking Work and Self
+## 8. Cross-Linking Work and Self
 
 This is the killer feature of the single-vault design.
 
-### 5.1 Link a project to a topic
+### 8.1 Link a project to a topic
 
 ```bash
 # While in work mode, working on my-api
@@ -360,61 +515,40 @@ obs-write --link "Self/Topics/python"
 obs-write --link "Self/Topics/security"
 ```
 
-This adds `[[Self/Topics/python]]` wikilinks to your project's README.md.
-
-### 5.2 Discover cross-references
+### 8.2 Discover cross-references
 
 ```bash
 # Search across both Work and Self for a keyword
 obs-search --cross "authentication"
 ```
 
-Output:
-```
-=== Cross-search: "authentication" (both Work and Self) ===
+### 8.3 Use Obsidian's graph view
 
-## Work
-  - Work/Projects/my-api/Decisions/log.md
-    Decision: Using JWT tokens for authentication
-  - Work/Projects/auth-service/README.md
-
-## Self
-  - Self/Topics/security/learnings.md
-    OWASP authentication cheat sheet
-```
-
-### 5.3 Manual wikilinks in notes
-
-In any Obsidian note, use wikilinks:
-
-```markdown
-<!-- In Work/Projects/my-api/README.md -->
-Auth patterns from: [[Self/Topics/security/learnings]]
-
-<!-- In Self/Topics/python/learnings.md -->
-Applied in: [[Work/Projects/my-api/README|my-api project]]
-```
-
-Obsidian tracks renames automatically, so links don't break when you reorganize.
-
-### 5.4 Backlinks
-
-With Obsidian CLI:
-
-```bash
-obsidian backlinks path="Work/Projects/my-api/README.md"
-```
-
-Or from obs-lib:
-
-```bash
-# In obs-read --all, cross-references are shown automatically
-obs-read --all
-```
+Because everything is in one vault, you can visualize connections between projects and learning topics.
 
 ---
 
-## 6. Command Reference
+## 9. Command Reference
+
+### Deployment
+
+| Command | Description |
+|---------|-------------|
+| `ai-deploy` | Deploy source → runtime, rebuild prompts |
+| `ai-deploy --dry-run` | Show what would be synced |
+| `ai-deploy --quiet` | Suppress output (for git hook) |
+| `ai-deploy --install-hook` | Configure git to use .githooks/ |
+
+### Mode switching
+
+| Command | Description |
+|---------|-------------|
+| `ai-mode` | Show current status (mode, vault, transport, tasks) |
+| `ai-mode work` | Switch to work mode |
+| `ai-mode self` | Switch to self mode |
+| `ai-mode --init` | Create vault directory structure |
+| `ai-mode --init-modes` | Create mode directories in ~/.ai/modes/ |
+| `ai-mode --list` | List all projects and topics |
 
 ### Session management
 
@@ -425,25 +559,13 @@ obs-read --all
 | `ai-start self` | Switch to self mode and start |
 | `ai-start --rebuild` | Start + rebuild context for all AI tools |
 
-### Mode switching
-
-| Command | Description |
-|---------|-------------|
-| `ai-work` | Quick alias: `export AI_MODE="work"` |
-| `ai-self` | Quick alias: `export AI_MODE="self"` |
-| `ai-mode` | Show current status (mode, vault, transport, tasks) |
-| `ai-mode work` | Switch to work mode |
-| `ai-mode self` | Switch to self mode |
-| `ai-mode --init` | Create vault directory structure |
-| `ai-mode --list` | List all projects and topics |
-
 ### Reading from Obsidian
 
 | Command | Description |
 |---------|-------------|
-| `obs-read` | Read project/topic context (README.md or learnings.md) |
+| `obs-read` | Read project/topic context |
 | `obs-read --session` | Read Session.md tasks only |
-| `obs-read --all` | Full context: main + session + decisions + errors + skills + cross-refs |
+| `obs-read --all` | Full context: main + session + decisions + errors + skills |
 
 ### Writing to Obsidian
 
@@ -456,7 +578,6 @@ obs-read --all
 | `obs-write --fix "text"` | Log a bug fix (timestamped) |
 | `obs-write --skill "text"` | Log a learned pattern (timestamped) |
 | `obs-write --link "path"` | Add cross-link to another note |
-| `echo "text" \| obs-write` | Pipe content as session log |
 
 ### Searching Obsidian
 
@@ -473,9 +594,9 @@ obs-read --all
 
 | Command | Description |
 |---------|-------------|
-| `ai-review` | Linters (ruff, black, mypy, bandit) + AI review |
-| `ai-review --lint-only` | Mechanical checks only, no AI |
-| `ai-ship` | Full pre-ship checklist (tests, types, lint, audit, secrets) |
+| `ai-review` | Linters + AI review |
+| `ai-review --lint-only` | Mechanical checks only |
+| `ai-ship` | Full pre-ship checklist |
 
 ### Debugging
 
@@ -484,114 +605,121 @@ obs-read --all
 | `ai-debug` | Interactive debug protocol |
 | `ai-debug --test path/to/test.py` | Run specific test in debug mode |
 | `ai-debug --error "message"` | Analyze a specific error |
-| `ai-debug --profile module.func` | Profile function performance |
 
 ### Context building
 
 | Command | Description |
 |---------|-------------|
-| `build-context` | Assemble ~/.ai/context/ into ~/.ai/prompts/global.md |
+| `build-context` | Assemble prompts to ~/.ai/prompts/global.md |
 | `build-context --obsidian` | Include current Obsidian project context |
 | `build-context --adapter all` | Push to all detected AI tools |
 | `build-context --adapter claude-code` | Push to Claude Code only |
 | `build-context --stdout` | Print assembled context to stdout |
 
+### MCP servers
+
+| Command | Description |
+|---------|-------------|
+| `ai-mcp list` | List all registered MCP servers |
+| `ai-mcp enable <name>` | Enable an MCP server |
+| `ai-mcp disable <name>` | Disable an MCP server |
+| `ai-mcp distribute all` | Push MCP config to all AI tools |
+
 ### Project scaffolding
 
 | Command | Description |
 |---------|-------------|
-| `ai-init` | Scaffold current directory (uses dirname as project name) |
+| `ai-init` | Scaffold current directory |
 | `ai-init my-project` | Scaffold with explicit name |
-| `ai-init --global-install` | One-time: install ~/.ai, PATH, shell config |
 
 ---
 
-## 7. Obsidian Vault Management
+## 10. Context System Deep Dive
 
-### 7.1 Vault structure
+### 10.1 Context layering
+
+Context is assembled in layers, from broadest to most specific:
 
 ```
-Brain/                              # OBSIDIAN_VAULT
-├── Work/
-│   └── Projects/
-│       ├── my-api/
-│       │   ├── README.md           # project context
-│       │   ├── Session.md          # current AI tasks
-│       │   ├── Sessions/
-│       │   │   ├── 2026-03-30.md   # daily session logs
-│       │   │   └── 2026-03-31.md
-│       │   ├── Decisions/
-│       │   │   └── log.md          # all decisions, timestamped
-│       │   ├── Skills/
-│       │   │   └── log.md          # patterns learned
-│       │   └── Errors/
-│       │       └── log.md          # bug fixes
-│       └── auth-service/
-│           └── ...
-├── Self/
-│   └── Topics/
-│       ├── python/
-│       │   ├── learnings.md
-│       │   ├── Session.md
-│       │   └── ...
-│       └── security/
-│           └── ...
-└── Library/                        # cross-cutting (manual use)
-    ├── Decisions/
-    ├── Skills/
-    └── Errors/
+Layer 1: Identity       (~/.ai/modes/{mode}/identity.md)
+   ↓
+Layer 2: Tools          (~/.ai/modes/{mode}/tools.md)
+   ↓
+Layer 3: Mode rules     (~/.ai/modes/{mode}/rules/*.md)
+   ↓
+Layer 4: Shared skills  (~/.ai/shared/skills/*.md)
+   ↓
+Layer 5: Shared agents  (~/.ai/shared/agents/*.md)
+   ↓
+Layer 6: MCP servers    (~/.ai/shared/mcp-servers.json)
+   ↓
+Layer 7: Project rules  (.ai/rules/conventions.md)
+   ↓
+Layer 8: AGENTS.md      (project root — AI reads directly)
+   ↓
+Layer 9: Obsidian       (Session.md, Decisions — pulled by obs-read)
 ```
 
-### 7.2 Log file format
+Layers 1-6 are assembled by `build-context` into `~/.ai/prompts/global.md`, then pushed to each tool's global config via adapters.
 
-All log files use the same timestamp format:
+Layers 7-9 are read directly by the AI tool or pulled on-demand.
 
-```markdown
-- [2026-03-31 14:30] Decision: Using JWT over sessions — stateless, scales better
-- [2026-03-31 15:15] Decision: Redis for rate limiting — need distributed counters
+### 10.2 Editing global context
+
+**Edit in source, commit to deploy:**
+
+```bash
+cd ~/.ai-dev
+
+# Edit a mode-specific rule
+vim modes/work/rules/python.md
+
+# Edit a shared skill
+vim shared/skills/debugging.md
+
+# Add a new agent
+vim shared/agents/architect.md
+
+# Commit to deploy
+git add -A
+git commit -m "feat: add architect agent"
 ```
 
-### 7.3 Session file format
+### 10.3 Context files reference
 
-Daily session files in `Sessions/YYYY-MM-DD.md`:
+| File | Location | Purpose |
+|------|----------|---------|
+| `identity.md` | `modes/{mode}/` | Who the AI is in this mode |
+| `tools.md` | `modes/{mode}/` | Git remote, CLI tools for this mode |
+| `rules/*.md` | `modes/{mode}/` | Mode-specific coding rules |
+| `agents/*.md` | `shared/` | Agent personas (planner, reviewer) |
+| `skills/*.md` | `shared/` | Skill patterns (debugging, TDD) |
+| `mcp-servers.json` | `shared/` | MCP server registry |
 
-```markdown
-## [14:30] my-api — work session
+### 10.4 Where context goes
 
-### Decisions
-- Chose sliding window for rate limiting
-
-### Fixes / discoveries
-- Fixed race condition in token refresh
-
-### Skills learned
-- Redis MULTI/EXEC for atomic counter operations
-
-### Open
-- Need to benchmark under load
-
-### Notes
-- Pair-programmed with Claude Code, 2hr session
-```
-
-### 7.4 Using Obsidian features
-
-Because everything is in one vault, you can use Obsidian's full power:
-
-- **Graph view**: See connections between projects and topics
-- **Search**: `ctrl+shift+F` for vault-wide search
-- **Tags**: Add `#active`, `#archived`, `#blocked` to notes
-- **Properties**: Add frontmatter for structured metadata
-- **Templates**: Use Obsidian templates for consistent note creation
-- **Daily notes**: Obsidian CLI integrates with daily notes plugin
+| Destination | Generated by | Content |
+|-------------|--------------|---------|
+| `~/.ai/prompts/global.md` | `build-context` | Full assembled context |
+| `~/.claude/CLAUDE.md` | adapter-claude-code | Claude Code global config |
+| `~/.codex/instructions.md` | adapter-codex | Codex CLI global config |
+| `~/.config/opencode/system.md` | adapter-opencode | OpenCode global config |
 
 ---
 
-## 8. Multi-Agent Workflow
+## 11. Multi-Agent Workflow
 
-### 8.1 Using different AI tools
+### 11.1 Supported AI tools
 
-ai-dev is tool-agnostic. The same session works across tools:
+ai-dev works with multiple AI coding assistants:
+
+| Tool | Project context | Global context |
+|------|-----------------|----------------|
+| Claude Code | `CLAUDE.md` → `AGENTS.md` | `~/.claude/CLAUDE.md` |
+| Codex CLI | `AGENTS.md` (native) | `~/.codex/instructions.md` |
+| OpenCode | `AGENTS.md` (native) | `~/.config/opencode/system.md` |
+
+### 11.2 Using different tools
 
 ```bash
 # Start session (works for any tool)
@@ -607,261 +735,196 @@ codex
 opencode
 ```
 
-All tools read from:
-- `AGENTS.md` in project root (project-specific context)
-- Their global config file (generated by adapters from `~/.ai/context/`)
-
-### 8.2 Switching tools mid-session
+### 11.3 Rebuilding for specific tools
 
 ```bash
-# Rebuild context for a specific tool
-build-context --obsidian --adapter claude-code
-
-# Or rebuild for all
-build-context --obsidian --adapter all
-```
-
-### 8.3 Tool-specific overrides
-
-Set `AI_TOOL` to override auto-detection in shell commands:
-
-```bash
-AI_TOOL=codex ai-review       # use Codex for the AI review step
-AI_TOOL=none ai-ship           # run checklist without AI, print for manual paste
-```
-
-### 8.4 Where each tool reads context
-
-| Tool | Project context | Global context |
-|---|---|---|
-| Claude Code | `CLAUDE.md` → `AGENTS.md` (symlink) | `~/.claude/CLAUDE.md` |
-| Codex CLI | `AGENTS.md` (native) | `~/.codex/instructions.md` |
-| OpenCode | `AGENTS.md` (native) | `~/.config/opencode/system.md` |
-
-### 8.5 Bundled skills
-
-ai-dev ships two skills compatible with the [Agent Skills spec](https://github.com/kepano/obsidian-skills):
-
-| Skill | Location | Purpose |
-|---|---|---|
-| `obsidian-cli` | `~/.ai/skills/obsidian-cli/SKILL.md` | Teaches AI agents Obsidian CLI commands |
-| `obsidian-markdown` | `~/.ai/skills/obsidian-markdown/SKILL.md` | Teaches AI agents Obsidian-flavored markdown |
-
-These are auto-invoked by Claude Code and Codex when the task involves Obsidian files.
-
----
-
-## 9. Context System Deep Dive
-
-### 9.1 Context layering
-
-Context is assembled in layers, from broadest to most specific:
-
-```
-Layer 1: Identity       (~/.ai/context/identity.md)
-   ↓
-Layer 2: Global rules   (~/.ai/context/rules/*.md)
-   ↓
-Layer 3: Global skills  (~/.ai/context/skills/*.md)
-   ↓
-Layer 4: Agent personas (~/.ai/context/agents/*.md)
-   ↓
-Layer 5: Project rules  (.ai/rules/conventions.md)
-   ↓
-Layer 6: Project skills (.ai/skills/stack.md)
-   ↓
-Layer 7: AGENTS.md      (project root — the AI reads this directly)
-   ↓
-Layer 8: Obsidian       (Session.md, Decisions, Skills — pulled by obs-read)
-```
-
-Layers 1-4 are assembled by `build-context` into `~/.ai/prompts/global.md`, then pushed to each tool's global config via adapters.
-
-Layers 5-7 are read directly by the AI tool from the project directory.
-
-Layer 8 is pulled on-demand by `obs-read` or `ai-start`.
-
-### 9.2 Editing global context
-
-```bash
-# Edit a rule
-$EDITOR ~/.ai/context/rules/python.md
-
-# Add a new rule
-$EDITOR ~/.ai/context/rules/myteam.md
-
-# Rebuild and push to all tools
+# Rebuild for all tools
 build-context --adapter all
+
+# Rebuild for specific tool
+build-context --adapter claude-code
 ```
 
-### 9.3 Editing project context
+### 11.4 MCP servers
+
+MCP servers provide additional capabilities to AI tools:
 
 ```bash
-# Project-specific rules
-$EDITOR .ai/rules/conventions.md
+# List available servers
+ai-mcp list
 
-# Project-specific stack notes
-$EDITOR .ai/skills/stack.md
+# Enable a server
+ai-mcp enable serena
 
-# Main AI context
-$EDITOR AGENTS.md
+# Distribute to all tools
+ai-mcp distribute all
 ```
 
-No rebuild needed — AI tools read these directly.
-
-### 9.4 Context files reference
-
-| File | Purpose | Example content |
-|---|---|---|
-| `identity.md` | Who the AI is, how it works | Senior Python engineer persona, session cycle |
-| `rules/general.md` | Planning, code quality, git | Plan before code, test after, never commit secrets |
-| `rules/python.md` | Python-specific rules | Python 3.12, uv, types everywhere, forbidden patterns |
-| `rules/security.md` | Security rules | Parameterized queries, no secrets in code, input validation |
-| `skills/python.md` | Python patterns | Project layout, Pydantic, service pattern, subprocess |
-| `skills/tdd.md` | Testing patterns | Red-green-refactor, pytest, conftest, what to test |
-| `skills/debugging.md` | Debug protocol | 8-step process, pdb, profiling, common bugs |
-| `agents/planner.md` | Plan-before-code persona | Asks clarifying questions, assesses complexity |
-| `agents/reviewer.md` | Code review persona | Correctness, types, tests, style scoring |
+Registry location: `~/.ai/shared/mcp-servers.json`
 
 ---
 
-## 10. Real-World Flows
+## 12. Obsidian Vault Management
 
-### 10.1 Flow: Starting a new project
+### 12.1 Vault structure
 
-```bash
-# 1. Create project directory
-mkdir ~/code/invoice-api && cd ~/code/invoice-api
-git init
-
-# 2. Scaffold
-ai-init
-
-# 3. Edit AGENTS.md with your stack
-$EDITOR AGENTS.md
-
-# 4. Set up Obsidian session
-obs-write --session "Initial setup: project structure, FastAPI boilerplate, DB schema"
-
-# 5. Build context
-build-context --obsidian --adapter all
-
-# 6. Start coding with your AI tool
-ai-start
-claude  # or codex / opencode
+```
+Brain/                              # OBSIDIAN_VAULT
+├── Work/
+│   └── Projects/
+│       ├── my-api/
+│       │   ├── README.md           # project context
+│       │   ├── Session.md          # current AI tasks
+│       │   ├── Sessions/           # daily session logs
+│       │   ├── Decisions/log.md    # all decisions
+│       │   ├── Skills/log.md       # patterns learned
+│       │   └── Errors/log.md       # bug fixes
+│       └── auth-service/
+├── Self/
+│   └── Topics/
+│       ├── python/
+│       │   ├── learnings.md
+│       │   ├── Session.md
+│       │   └── ...
+│       └── security/
+└── Library/                        # cross-cutting
+    ├── Decisions/
+    ├── Skills/
+    ├── Agents/
+    └── AgentConfig/                # optional: Obsidian as source
+        ├── work/
+        └── self/
 ```
 
-### 10.2 Flow: Daily coding session
+### 12.2 Log file format
+
+All log files use timestamped entries:
+
+```markdown
+- [2026-04-07 14:30] Decision: Using JWT over sessions — stateless, scales better
+- [2026-04-07 15:15] Decision: Redis for rate limiting — need distributed counters
+```
+
+### 12.3 Using Obsidian features
+
+Because everything is in one vault:
+
+- **Graph view**: See connections between projects and topics
+- **Search**: `ctrl+shift+F` for vault-wide search
+- **Tags**: Add `#active`, `#archived`, `#blocked` to notes
+- **Properties**: Add frontmatter for structured metadata
+- **Templates**: Use Obsidian templates for consistent note creation
+- **Daily notes**: Integrates with daily notes plugin
+
+---
+
+## 13. Real-World Flows
+
+### 13.1 Flow: Making a config change
+
+```bash
+# 1. Edit in source
+cd ~/.ai-dev
+vim modes/work/rules/python.md
+
+# 2. Commit (auto-deploys)
+git add -A
+git commit -m "feat(rules): add async guidelines"
+
+# 3. Verify
+cat ~/.ai/.deployed
+# Shows new commit hash
+
+# 4. Check it's in your AI tool
+head -50 ~/.claude/CLAUDE.md
+```
+
+### 13.2 Flow: Adding a new skill
+
+```bash
+# 1. Create skill file
+cd ~/.ai-dev
+cat > shared/skills/docker.md << 'EOF'
+# Docker Skill
+
+## Dockerfile best practices
+- Use multi-stage builds
+- Pin base image versions
+- Run as non-root user
+
+## Common commands
+- `docker build -t name .`
+- `docker run --rm -it name`
+EOF
+
+# 2. Commit
+git add -A
+git commit -m "feat(skills): add Docker skill"
+
+# 3. Skill is now available to all AI tools
+```
+
+### 13.3 Flow: Daily coding session
 
 ```bash
 # 1. Start
 cd ~/code/invoice-api
 ai-start
 
-# 2. Review tasks from yesterday's session
-obs-read --session
-
-# 3. Work with AI tool
+# 2. Work with AI
 claude
 
-# 4. Log decisions as you go
-obs-write --decision "Using Stripe webhooks, not polling — real-time, less infra"
-obs-write --fix "PDF generation OOM on large invoices — streaming with reportlab"
+# 3. Log decisions
+obs-write --decision "Using Stripe webhooks, not polling"
 
-# 5. Before committing
+# 4. Before PR
 ai-review
-
-# 6. Before PR
 ai-ship
 
-# 7. End session
+# 5. End session
 obs-write
 ```
 
-### 10.3 Flow: Debugging a production issue
+### 13.4 Flow: Switching between modes
 
 ```bash
-# 1. Start debug session
-ai-start
-ai-debug --error "ConnectionResetError in /api/invoices after 30s"
-
-# 2. Log what you find
-obs-write --fix "DB connection pool exhausted — increased max_size from 5 to 20"
-obs-write --decision "Adding connection pool monitoring via prometheus"
-
-# 3. Verify fix
-ai-debug --test tests/test_db_pool.py
-
-# 4. Ship
-ai-review
-ai-ship
-```
-
-### 10.4 Flow: Learning a new topic
-
-```bash
-# 1. Switch to self mode
-ai-self
-mkdir ~/learning/kubernetes && cd ~/learning/kubernetes
-ai-init kubernetes
-
-# 2. Set exploration tasks
-obs-write --session "Understand pods, services, deployments. Build a local cluster."
-
-# 3. Work with AI
-ai-start
-claude  # ask questions, build examples
-
-# 4. Log what you learn
-obs-write --skill "kubectl apply -f creates/updates, kubectl create only creates"
-obs-write --skill "Services use label selectors, not direct pod references"
-obs-write --decision "Using k3s for local dev — lighter than minikube"
-
-# 5. Cross-link to a project that needs K8s
-obs-write --link "Work/Projects/invoice-api"
-
-# 6. End session
-obs-write
-```
-
-### 10.5 Flow: Switching between projects
-
-```bash
-# Working on project A
+# Working on company project
 ai-work
-cd ~/code/invoice-api
+cd ~/code/company-api
 ai-start
-# ... work ...
-obs-write                    # end session log
-
-# Switch to project B
-cd ~/code/auth-service
-ai-start                     # auto-detects project name from directory
 # ... work ...
 obs-write
 
-# Switch to learning
+# Switch to personal learning
 ai-self
 cd ~/learning/rust
 ai-start
 # ... learn ...
 obs-write
+
+# Back to work
+ai-work
 ```
 
-### 10.6 Flow: Weekly review
+### 13.5 Flow: Setting up on a new machine
 
 ```bash
-# See recent sessions across a project
-obs-search --recent 7
+# 1. Clone
+git clone git@github.com:yourname/ai-dev ~/.ai-dev
 
-# Search for all decisions this week
-obs-search --decisions
+# 2. Deploy
+~/.ai-dev/bin/ai-deploy
+~/.ai-dev/bin/ai-deploy --install-hook
 
-# Cross-search to find patterns
-obs-search --cross "performance"
-obs-search --cross "security"
+# 3. Add to PATH
+echo 'export PATH="$HOME/.ai/bin:$PATH"' >> ~/.zshrc
+echo 'export OBSIDIAN_VAULT="$HOME/Documents/Brain"' >> ~/.zshrc
+echo 'export AI_MODE="work"' >> ~/.zshrc
+source ~/.zshrc
 
-# Review in Obsidian graph view for visual connections
+# 4. Verify
+ai-mode
+ai-deploy --dry-run
 ```
 
 ---
@@ -869,11 +932,62 @@ obs-search --cross "security"
 ## Environment Variables
 
 | Variable | Required | Default | Description |
-|---|---|---|---|
-| `OBSIDIAN_VAULT` | Yes | — | Path to your single Obsidian vault |
+|----------|----------|---------|-------------|
+| `OBSIDIAN_VAULT` | Yes | — | Path to your Obsidian vault |
 | `AI_MODE` | No | `"work"` | Current mode: `"work"` or `"self"` |
 | `AI_PROJECT` | No | `basename $PWD` | Override project/topic name |
-| `AI_HOME` | No | `$HOME/.ai` | Location of ai-dev config |
-| `AI_TOOL` | No | auto-detect | Force specific AI tool for shell commands |
-| `OBS_VAULT_NAME` | No | — | Vault name for CLI targeting (multi-vault setups) |
+| `AI_HOME` | No | `$HOME/.ai` | Location of runtime config |
+| `AI_DEV` | No | `$HOME/.ai-dev` | Location of source repo |
+| `AI_TOOL` | No | auto-detect | Force specific AI tool |
 | `EDITOR` | No | `vi` | Editor for interactive obs-write |
+
+---
+
+## Troubleshooting
+
+### Deploy not working
+
+```bash
+# Check source exists
+ls ~/.ai-dev/modes ~/.ai-dev/shared
+
+# Check for syntax errors
+bash -n ~/.ai-dev/bin/ai-deploy
+
+# Run with output
+ai-deploy  # should show file counts
+```
+
+### Hook not running
+
+```bash
+# Verify hook is installed
+git -C ~/.ai-dev config --get core.hooksPath
+# Should show: .githooks
+
+# Verify hook is executable
+ls -la ~/.ai-dev/.githooks/post-commit
+# Should show: -rwxr-xr-x
+```
+
+### Mode switch not taking effect
+
+```bash
+# Check symlink
+ls -la ~/.ai/context
+# Should show: context -> /path/to/.ai/modes/{mode}
+
+# Rebuild manually
+build-context --adapter all
+```
+
+### AI tool not seeing changes
+
+```bash
+# Force rebuild
+ai-deploy
+
+# Check specific tool config
+cat ~/.claude/CLAUDE.md | head -20
+cat ~/.codex/instructions.md | head -20
+```
