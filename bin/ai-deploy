@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# ai-deploy — deploy ~/.ai-dev to ~/.ai runtime
+#
+# Usage:
+#   ai-deploy                deploy to ~/.ai
+#   ai-deploy --dry-run      show what would be synced
+#   ai-deploy --quiet        suppress output (for git hook)
+#   ai-deploy --install-hook configure git to use .githooks/
+
+set -euo pipefail
+
+AI_DEV="${AI_DEV:-$HOME/.ai-dev}"
+AI_HOME="${AI_HOME:-$HOME/.ai}"
+
+DRY_RUN=false
+QUIET=false
+INSTALL_HOOK=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run)      DRY_RUN=true ;;
+    --quiet|-q)     QUIET=true ;;
+    --install-hook) INSTALL_HOOK=true ;;
+    -h|--help)
+      echo "Usage: ai-deploy [--dry-run] [--quiet] [--install-hook]"
+      exit 0
+      ;;
+    *) echo "Unknown arg: $1" >&2; exit 1 ;;
+  esac
+  shift
+done
+
+log() {
+  if [[ "$QUIET" != true ]]; then
+    echo "$@"
+  fi
+}
+
+# Install git hook
+if [[ "$INSTALL_HOOK" == true ]]; then
+  git -C "$AI_DEV" config core.hooksPath .githooks
+  log "[ai-deploy] Git hook installed: .githooks/"
+  exit 0
+fi
+
+# Verify source exists
+if [[ ! -d "$AI_DEV" ]]; then
+  echo "[ai-deploy] error: source not found: $AI_DEV" >&2
+  exit 1
+fi
+
+# Check for required directories
+for dir in modes shared bin template; do
+  if [[ ! -d "$AI_DEV/$dir" ]]; then
+    echo "[ai-deploy] error: missing directory: $AI_DEV/$dir" >&2
+    exit 1
+  fi
+done
+
+# Rsync options
+RSYNC_OPTS="-a --delete"
+RSYNC_OPTS+=" --exclude=.git"
+RSYNC_OPTS+=" --exclude=.DS_Store"
+RSYNC_OPTS+=" --exclude=.githooks"
+RSYNC_OPTS+=" --exclude=prompts"
+RSYNC_OPTS+=" --exclude=.deployed"
+RSYNC_OPTS+=" --exclude=.env"
+RSYNC_OPTS+=" --exclude=specs"
+RSYNC_OPTS+=" --exclude=README.md"
+RSYNC_OPTS+=" --exclude=DEVELOPMENT.md"
+RSYNC_OPTS+=" --exclude=USAGE.md"
+RSYNC_OPTS+=" --exclude=.claude"
+RSYNC_OPTS+=" --exclude=*.pdf"
+
+if [[ "$DRY_RUN" == true ]]; then
+  RSYNC_OPTS+=" --dry-run"
+  log "[ai-deploy] DRY RUN — no changes will be made"
+fi
+
+log "[ai-deploy] Deploying $AI_DEV -> $AI_HOME"
+
+# Ensure target exists
+mkdir -p "$AI_HOME"
+
+# Sync each directory
+for dir in bin modes shared template; do
+  if [[ -d "$AI_DEV/$dir" ]]; then
+    # shellcheck disable=SC2086
+    rsync $RSYNC_OPTS "$AI_DEV/$dir/" "$AI_HOME/$dir/"
+    count=$(find "$AI_DEV/$dir" -type f | wc -l | tr -d ' ')
+    log "  $dir/    $count files"
+  fi
+done
+
+if [[ "$DRY_RUN" == true ]]; then
+  log "[ai-deploy] Would run: build-context --adapter all"
+  exit 0
+fi
+
+# Create context symlink if missing
+if [[ ! -L "$AI_HOME/context" ]]; then
+  if [[ -d "$AI_HOME/context" ]]; then
+    log "[ai-deploy] Backing up existing context directory"
+    mv "$AI_HOME/context" "$AI_HOME/context.bak.$(date +%s)"
+  fi
+  ln -s "$AI_HOME/modes/work" "$AI_HOME/context"
+  log "[ai-deploy] Created: context -> modes/work"
+fi
+
+# Run build-context
+BUILD_CONTEXT="$AI_HOME/bin/build-context"
+if [[ -x "$BUILD_CONTEXT" ]]; then
+  log "[ai-deploy] Running build-context..."
+  "$BUILD_CONTEXT" --adapter all 2>/dev/null || true
+fi
+
+# Write deployment metadata
+COMMIT_HASH=$(git -C "$AI_DEV" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+echo "commit: $COMMIT_HASH" > "$AI_HOME/.deployed"
+echo "timestamp: $TIMESTAMP" >> "$AI_HOME/.deployed"
+echo "source: $AI_DEV" >> "$AI_HOME/.deployed"
+
+log "[ai-deploy] Deployed: $COMMIT_HASH ($TIMESTAMP)"

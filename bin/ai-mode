@@ -51,18 +51,7 @@ switch_mode() {
   # Update shell env
   export AI_MODE="$mode"
   
-  # Rebuild context for all tools
-  local build_script="${AI_HOME}/bin/build-context"
-  if [[ -x "$build_script" ]]; then
-    "$build_script" 2>/dev/null || true
-  fi
-  
-  # Redistribute MCP servers
-  local mcp_script
-  mcp_script="$(dirname "${BASH_SOURCE[0]}")/ai-mcp"
-  if [[ -x "$mcp_script" ]]; then
-    "$mcp_script" distribute all 2>/dev/null || true
-  fi
+  # Note: Mode switching is instant. build-context runs during deploy, not here.
   
   # Log to Obsidian (if available)
   if obs_vault_set || obs_cli_available; then

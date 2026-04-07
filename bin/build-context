@@ -59,7 +59,7 @@ get_skills_dir() {
       return
     fi
   fi
-  echo "${AI_HOME}/context/skills"
+  echo "${AI_HOME}/shared/skills"
 }
 
 # Get agents directory (shared across modes)
@@ -71,7 +71,7 @@ get_agents_dir() {
       return
     fi
   fi
-  echo "${AI_HOME}/context/agents"
+  echo "${AI_HOME}/shared/agents"
 }
 
 CONTEXT_DIR=$(get_context_dir)
@@ -169,7 +169,7 @@ assemble() {
   # Skills (shared across modes)
   echo "# Skills available"
   echo ""
-  echo "Detailed skill files in Obsidian Library/Skills/. Reference them when relevant:"
+  echo "Detailed skill files in ~/.ai/shared/skills/. Reference them when relevant:"
   for f in "${SKILLS_DIR}/"*.md; do
     [[ -f "$f" ]] || continue
     name=$(basename "$f" .md)
@@ -190,7 +190,7 @@ assemble() {
   done
 
   # MCP servers available (from ~/.ai/context/ - not in Obsidian)
-  local mcp_registry="${AI_HOME}/context/mcp-servers.json"
+  local mcp_registry="${AI_HOME}/shared/mcp-servers.json"
   if [[ -f "$mcp_registry" ]] && command -v jq >/dev/null 2>&1; then
     local enabled_count
     enabled_count=$(jq '[.servers | to_entries[] | select(.value.enabled)] | length' "$mcp_registry")
@@ -200,7 +200,7 @@ assemble() {
       echo "The following MCP servers are available (managed via \`ai-mcp\`):"
       jq -r '.servers | to_entries[] | select(.value.enabled) | "- **\(.key)**: \(.value.description)"' "$mcp_registry"
       echo ""
-      echo "Registry: \`~/.ai/context/mcp-servers.json\`. Use \`ai-mcp list\` to see all."
+      echo "Registry: \`~/.ai/shared/mcp-servers.json\`. Use \`ai-mcp list\` to see all."
       echo ""
       echo "---"
       echo ""

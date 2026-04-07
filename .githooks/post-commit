@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Auto-deploy after commit
+
+AI_DEV="${AI_DEV:-$HOME/.ai-dev}"
+DEPLOY_SCRIPT="$AI_DEV/bin/ai-deploy"
+
+if [[ -x "$DEPLOY_SCRIPT" ]]; then
+  "$DEPLOY_SCRIPT" --quiet || echo "[post-commit] Warning: ai-deploy failed" >&2
+fi
