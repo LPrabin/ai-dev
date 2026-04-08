@@ -50,7 +50,7 @@ Task>>Implement conversation history search endpoint
 Bug>>Search returns empty results for queries with special chars (of ticket #42)
 ```
 
-Special characters allowed in titles: `! @ # $ % ^ & * ( ) _ + - = [ ] { } | \ ; ' : " , . / < > ?`
+Special characters allowed in tickets: `! @ # $ % ^ & * ( ) _ + - = [ ] { } | \ ; ' : " , . / < > ?`
 
 ---
 
