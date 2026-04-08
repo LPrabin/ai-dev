@@ -1,0 +1,285 @@
+#!/usr/bin/env bash
+# ai-skills — Unified skills management across all agents
+#
+# Source of truth: ~/.ai-dev/skills/
+# Distributes to:
+#   - Claude Code: ~/.claude/skills/
+#   - OpenCode: ~/.config/opencode/skills/
+#   - Codex: ~/.codex/skills/
+#   - Agents (shared): ~/.agents/skills/
+#
+# Usage:
+#   ai-skills list              List all skills
+#   ai-skills distribute        Distribute skills to all agents
+#   ai-skills distribute <agent> Distribute to specific agent (claude-code|opencode|codex|all)
+#   ai-skills add <name>        Create new skill scaffold
+#   ai-skills check             Check skill sync status
+
+set -euo pipefail
+
+AI_DEV_HOME="${AI_DEV_HOME:-$HOME/.ai-dev}"
+SKILLS_SOURCE="${AI_DEV_HOME}/skills"
+
+# List of all agents
+ALL_AGENTS="claude-code opencode codex agents"
+
+# Get target directory for an agent
+get_target_dir() {
+  local agent="$1"
+  case "$agent" in
+    claude-code) echo "$HOME/.claude/skills" ;;
+    opencode)    echo "$HOME/.config/opencode/skills" ;;
+    codex)       echo "$HOME/.codex/skills" ;;
+    agents)      echo "$HOME/.agents/skills" ;;
+    *)           echo "" ;;
+  esac
+}
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+log_info() { echo -e "${BLUE}[ai-skills]${NC} $*"; }
+log_success() { echo -e "${GREEN}[ai-skills]${NC} $*"; }
+log_warn() { echo -e "${YELLOW}[ai-skills]${NC} $*"; }
+log_error() { echo -e "${RED}[ai-skills]${NC} $*" >&2; }
+
+# Ensure source directory exists
+ensure_source() {
+  if [[ ! -d "$SKILLS_SOURCE" ]]; then
+    mkdir -p "$SKILLS_SOURCE"
+    log_info "Created skills source directory: $SKILLS_SOURCE"
+  fi
+}
+
+# List all skills
+cmd_list() {
+  ensure_source
+  echo "Skills in ${SKILLS_SOURCE}:"
+  echo ""
+  
+  local count=0
+  for skill_dir in "${SKILLS_SOURCE}"/*/; do
+    [[ -d "$skill_dir" ]] || continue
+    local skill_name
+    skill_name=$(basename "$skill_dir")
+    [[ "$skill_name" == "*" ]] && continue
+    
+    local skill_file="${skill_dir}SKILL.md"
+    if [[ -f "$skill_file" ]]; then
+      # Extract description from frontmatter
+      local desc
+      desc=$(sed -n '/^---$/,/^---$/p' "$skill_file" | grep "^description:" | sed 's/^description: *//' | head -1)
+      if [[ -z "$desc" ]]; then
+        # Try first paragraph after frontmatter
+        desc=$(sed '1,/^---$/d; 1,/^---$/d; /^$/q; p' "$skill_file" | head -1)
+      fi
+      printf "  ${GREEN}%-25s${NC} %s\n" "$skill_name" "${desc:0:60}"
+    else
+      printf "  ${YELLOW}%-25s${NC} (missing SKILL.md)\n" "$skill_name"
+    fi
+    count=$((count + 1))
+  done
+  
+  if [[ $count -eq 0 ]]; then
+    echo "  (no skills found)"
+  fi
+  echo ""
+  echo "Total: $count skill(s)"
+}
+
+# Distribute skills to a specific agent
+distribute_to_agent() {
+  local agent="$1"
+  local target
+  target=$(get_target_dir "$agent")
+  
+  if [[ -z "$target" ]]; then
+    log_error "Unknown agent: $agent"
+    return 1
+  fi
+  
+  mkdir -p "$target"
+  local synced=0
+  local skipped=0
+  
+  for skill_dir in "${SKILLS_SOURCE}"/*/; do
+    [[ -d "$skill_dir" ]] || continue
+    local skill_name
+    skill_name=$(basename "$skill_dir")
+    [[ "$skill_name" == "*" ]] && continue
+    
+    local skill_file="${skill_dir}SKILL.md"
+    if [[ ! -f "$skill_file" ]]; then
+      log_warn "Skipping $skill_name: no SKILL.md"
+      skipped=$((skipped + 1))
+      continue
+    fi
+    
+    local target_link="${target}/${skill_name}"
+    
+    # Remove existing (symlink or directory)
+    if [[ -L "$target_link" ]]; then
+      rm "$target_link"
+    elif [[ -d "$target_link" ]]; then
+      rm -rf "$target_link"
+    fi
+    
+    # Create symlink
+    ln -s "$skill_dir" "$target_link"
+    synced=$((synced + 1))
+  done
+  
+  log_success "$agent: synced $synced skill(s), skipped $skipped"
+}
+
+# Distribute to all agents
+cmd_distribute() {
+  ensure_source
+  
+  local agent="${1:-all}"
+  
+  if [[ "$agent" == "all" ]]; then
+    for a in $ALL_AGENTS; do
+      distribute_to_agent "$a"
+    done
+    log_success "Skills distributed to all agents"
+  else
+    local target
+    target=$(get_target_dir "$agent")
+    if [[ -z "$target" ]]; then
+      log_error "Unknown agent: $agent"
+      echo "Available agents: $ALL_AGENTS"
+      exit 1
+    fi
+    distribute_to_agent "$agent"
+  fi
+}
+
+# Check sync status
+cmd_check() {
+  ensure_source
+  echo "Skill sync status:"
+  echo ""
+  
+  for agent in $ALL_AGENTS; do
+    local target
+    target=$(get_target_dir "$agent")
+    local status="OK"
+    local issues=""
+    
+    if [[ ! -d "$target" ]]; then
+      status="MISSING"
+      issues="directory does not exist"
+    else
+      for skill_dir in "${SKILLS_SOURCE}"/*/; do
+        [[ -d "$skill_dir" ]] || continue
+        local skill_name
+        skill_name=$(basename "$skill_dir")
+        [[ "$skill_name" == "*" ]] && continue
+        
+        local target_link="${target}/${skill_name}"
+        if [[ ! -e "$target_link" ]]; then
+          status="OUT OF SYNC"
+          issues="${issues:+$issues, }missing: $skill_name"
+        elif [[ -L "$target_link" ]]; then
+          local link_target
+          link_target=$(readlink "$target_link")
+          if [[ "$link_target" != "$skill_dir" && "$link_target" != "${skill_dir%/}" ]]; then
+            status="OUT OF SYNC"
+            issues="${issues:+$issues, }wrong link: $skill_name"
+          fi
+        fi
+      done
+    fi
+    
+    if [[ "$status" == "OK" ]]; then
+      printf "  ${GREEN}%-15s${NC} %s\n" "$agent" "$status"
+    else
+      printf "  ${YELLOW}%-15s${NC} %s (%s)\n" "$agent" "$status" "$issues"
+    fi
+  done
+  echo ""
+  echo "Run 'ai-skills distribute' to sync all agents."
+}
+
+# Create new skill scaffold
+cmd_add() {
+  local name="$1"
+  
+  if [[ -z "$name" ]]; then
+    log_error "Usage: ai-skills add <skill-name>"
+    exit 1
+  fi
+  
+  ensure_source
+  local skill_dir="${SKILLS_SOURCE}/${name}"
+  
+  if [[ -d "$skill_dir" ]]; then
+    log_error "Skill already exists: $skill_dir"
+    exit 1
+  fi
+  
+  mkdir -p "$skill_dir"
+  
+  cat > "${skill_dir}/SKILL.md" << 'EOF'
+---
+name: SKILL_NAME
+description: Brief description of what this skill does. Use when...
+allowed-tools: Bash, Read, Write, Edit
+---
+
+# SKILL_NAME
+
+One-line summary of the skill.
+
+## When to Use
+
+- Trigger condition 1
+- Trigger condition 2
+
+## Workflow
+
+1. Step one
+2. Step two
+3. Step three
+
+## Rules
+
+- Rule 1
+- Rule 2
+EOF
+
+  sed -i '' "s/SKILL_NAME/${name}/g" "${skill_dir}/SKILL.md"
+  
+  log_success "Created skill scaffold: $skill_dir"
+  echo "Edit ${skill_dir}/SKILL.md to define your skill."
+  echo "Then run: ai-skills distribute"
+}
+
+# Main
+case "${1:-}" in
+  list)       cmd_list ;;
+  distribute) shift; cmd_distribute "${1:-all}" ;;
+  check)      cmd_check ;;
+  add)        shift; cmd_add "${1:-}" ;;
+  -h|--help|"")
+    echo "ai-skills — Unified skills management"
+    echo ""
+    echo "Usage:"
+    echo "  ai-skills list              List all skills"
+    echo "  ai-skills distribute [agent] Distribute skills to agents"
+    echo "  ai-skills check             Check skill sync status"
+    echo "  ai-skills add <name>        Create new skill scaffold"
+    echo ""
+    echo "Agents: $ALL_AGENTS"
+    echo "Source: ${SKILLS_SOURCE}"
+    ;;
+  *)
+    log_error "Unknown command: $1"
+    exit 1
+    ;;
+esac

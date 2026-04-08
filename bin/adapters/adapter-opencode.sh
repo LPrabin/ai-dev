@@ -35,3 +35,11 @@ cat "$GLOBAL_CONTEXT" >> "$SYSTEM_FILE"
 
 echo "[adapter-opencode] wrote: ${SYSTEM_FILE} ($(wc -l < "$SYSTEM_FILE") lines)"
 echo "[adapter-opencode] note: OpenCode reads AGENTS.md per-project natively."
+
+# Distribute skills from ~/.ai-dev/skills/ to ~/.config/opencode/skills/
+AI_SKILLS="${AI_HOME:-$HOME/.ai-dev}/bin/ai-skills"
+if [[ -x "$AI_SKILLS" ]]; then
+  "$AI_SKILLS" distribute opencode
+else
+  echo "[adapter-opencode] warning: ai-skills not found, skipping skills distribution" >&2
+fi

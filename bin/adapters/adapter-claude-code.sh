@@ -120,3 +120,11 @@ if [[ -f "$MCP_REGISTRY" ]] && command -v jq >/dev/null 2>&1 && command -v claud
 
   echo "[adapter-claude-code] added ${MCP_COUNT} MCP server(s) via claude mcp add-json"
 fi
+
+# Distribute skills from ~/.ai-dev/skills/ to ~/.claude/skills/
+AI_SKILLS="${AI_HOME:-$HOME/.ai-dev}/bin/ai-skills"
+if [[ -x "$AI_SKILLS" ]]; then
+  "$AI_SKILLS" distribute claude-code
+else
+  echo "[adapter-claude-code] warning: ai-skills not found, skipping skills distribution" >&2
+fi

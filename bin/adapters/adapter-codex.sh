@@ -39,3 +39,11 @@ cat >> "$CODEX_INSTRUCTIONS" <<'FOOTER'
 FOOTER
 
 echo "[adapter-codex] wrote: ${CODEX_INSTRUCTIONS} ($(wc -l < "$CODEX_INSTRUCTIONS") lines)"
+
+# Distribute skills from ~/.ai-dev/skills/ to ~/.codex/skills/
+AI_SKILLS="${AI_HOME:-$HOME/.ai-dev}/bin/ai-skills"
+if [[ -x "$AI_SKILLS" ]]; then
+  "$AI_SKILLS" distribute codex
+else
+  echo "[adapter-codex] warning: ai-skills not found, skipping skills distribution" >&2
+fi
