@@ -37,6 +37,14 @@ Ask the user (or infer) for:
 | **Category label** | Required — see table below |
 | **Platform label** | Optional — API / UI / CSS / Design |
 | **Linked story** | Issue # (required for Tasks and Bugs) |
+| **Assignee** | Default: `@prabin.lamichhane` (self) — ask if assigning to others |
+
+### Assignee Rules
+
+- **Default to self-assignment:** `@prabin.lamichhane`
+- If the user says "assign to me" or doesn't specify, use the default
+- If assigning to someone else, ask for their GitLab username
+- Use the `--assignee` flag with the username (without `@` prefix)
 
 ---
 
@@ -51,6 +59,18 @@ Bug>>Search returns empty results for queries with special chars (of ticket #42)
 ```
 
 Special characters allowed in tickets: `! @ # $ % ^ & * ( ) _ + - = [ ] { } | \ ; ' : " , . / < > ?`
+
+### Character Safety (important)
+
+- Even though the punctuation above is allowed, ticket titles/descriptions must stay plain ASCII text.
+- Do **not** use unicode arrow symbols (for example: `->`, `=>`, `→`, `➡`, `⟶`) or emojis.
+- The title separator is always exactly `>>` (for example: `Task>>Implement search API`).
+- If user text includes emojis or unicode arrows, rewrite to plain text before draft/creation.
+- Safe replacements:
+  - `→`, `➡`, `⟶` -> `to`
+  - `✅` -> `[done]`
+  - `❌` -> `[blocked]`
+  - `🔥` -> `[high-priority]`
 
 ---
 
@@ -145,8 +165,11 @@ glab issue create \
 #42
 BODY
 )" \
-  --label "TO DO,R&D,API"
+  --label "TO DO,R&D,API" \
+  --assignee "prabin.lamichhane"
 ```
+
+**Note:** The `--assignee` flag takes the username without the `@` prefix.
 
 Capture the output — it contains the issue URL with the issue number.
 
@@ -190,6 +213,7 @@ Use this to comment progress, blockers, or completion notes on any existing issu
 ## Rules
 
 - Title **must** start with `User Story>>`, `Task>>`, or `Bug>>`
+- Title/body must be plain ASCII text (no emojis, no unicode arrows)
 - Each issue gets **exactly one** status label and **exactly one** category label
 - Platform label is optional but if used, use only one
 - Tasks and Bugs **must** reference their linked user story `#N` in the body
